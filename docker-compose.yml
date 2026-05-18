@@ -1,0 +1,42 @@
+services:
+
+  ran-generator:
+    build:
+      context: ./services/ran_generator
+    container_name: ran-generator
+    environment:
+      OUTPUT_MODE:             ${RAN_OUTPUT_MODE:-stdout}
+      RAN_INTERVAL_SECONDS:    ${RAN_INTERVAL_SECONDS:-30}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka-broker-1:9092}
+      KAFKA_TOPIC:             ${RAN_KAFKA_TOPIC:-ran_telemetry}
+    volumes:
+      - ran_data:/data
+    networks:
+      - towerhealth
+    restart: unless-stopped
+
+  weather-producer:
+    build:
+      context: ./services/weather_producer
+    container_name: weather-producer
+    environment:
+      OUTPUT_MODE:             ${WEATHER_OUTPUT_MODE:-stdout}
+      WEATHERAPI_KEY:          ${WEATHERAPI_KEY}
+      WEATHER_LOCATION:        ${WEATHER_LOCATION:-Cairo}
+      WEATHER_LAT:             ${WEATHER_LAT:-}
+      WEATHER_LON:             ${WEATHER_LON:-}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka-broker-1:9092}
+      KAFKA_TOPIC:             ${WEATHER_KAFKA_TOPIC:-weather_events}
+      WEATHER_POLL_SECONDS:    ${WEATHER_POLL_SECONDS:-300}
+    networks:
+      - towerhealth
+    restart: unless-stopped
+
+# ── Add your Kafka broker service here when ready ──────────────────────────
+
+volumes:
+  ran_data:
+
+networks:
+  towerhealth:
+    driver: bridge
