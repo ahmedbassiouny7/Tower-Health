@@ -1,5 +1,5 @@
 """
-NetPulse – RAN Telemetry Simulator  (Multi-Site, Stateful)
+TowerHealth – RAN Telemetry Simulator  (Multi-Site, Stateful)
 ===========================================================
 Emits one JSON message per RAN site every 30 seconds.
 4 independent sites → 4 messages per 30-second cycle.
@@ -651,7 +651,7 @@ def to_stdout(snapshot: Dict) -> None:
     print("\n" + "=" * 72)
     site_id   = snapshot["ran_metadata"]["site_id"]
     site_name = snapshot["ran_metadata"]["site_name"]
-    print(f"  NetPulse  |  {snapshot['timestamp']}  |  {site_name} ({site_id})  |  seq={snapshot['sequence_number']}")
+    print(f"  TowerHealth  |  {snapshot['timestamp']}  |  {site_name} ({site_id})  |  seq={snapshot['sequence_number']}")
     print("=" * 72)
     print(json.dumps(snapshot, indent=2, ensure_ascii=False), flush=True)
 
@@ -707,7 +707,7 @@ def main() -> None:
     sites = [SiteState(meta) for meta in SITE_TOPOLOGY]
 
     print("=" * 72)
-    print("  NetPulse  –  RAN Telemetry Simulator  (Multi-Site, Stateful)")
+    print("  TowerHealth  –  RAN Telemetry Simulator  (Multi-Site, Stateful)")
     print(f"  Sites    : {NUM_SITES}  |  Interval : {INTERVAL_SECONDS}s  |  Output : {OUTPUT_MODE}")
     for s in sites:
         loc = s.meta["location"]

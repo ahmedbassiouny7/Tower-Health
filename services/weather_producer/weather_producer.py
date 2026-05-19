@@ -1,5 +1,5 @@
 """
-Weather producer for NetPulse.
+Weather producer for TowerHealth.
 
 OUTPUT_MODE env var:
   "stdout"  – fetch and print JSON to console (no Kafka needed)
@@ -59,6 +59,7 @@ def env_int(name: str, default: int) -> int:
 
 
 def get_weather_location() -> str:
+    """Prefer exact coordinates, then fall back to a named WeatherAPI location."""
     lat = os.getenv("WEATHER_LAT")
     lon = os.getenv("WEATHER_LON")
     if lat and lon:
@@ -67,6 +68,7 @@ def get_weather_location() -> str:
 
 
 def build_weather_event(location_query: str, mapped_weather: dict[str, Any]) -> dict[str, Any]:
+    """Wrap mapped WeatherAPI fields with metadata useful for Kafka consumers."""
     event: dict[str, Any] = {
         "event_timestamp": datetime.now(timezone.utc).isoformat(),
         "source_system":   "weather_producer",
@@ -98,6 +100,8 @@ def create_kafka_producer(bootstrap_servers: str):
 
     while running:
         try:
+            # Kafka can start slower than this container. Keep retrying so
+            # docker compose up works without manual ordering.
             return KafkaProducer(
                 bootstrap_servers=bootstrap_servers,
                 value_serializer=lambda v: json.dumps(v).encode("utf-8"),
@@ -117,6 +121,7 @@ def create_kafka_producer(bootstrap_servers: str):
 
 
 def emit_kafka(producer, topic: str, event: dict[str, Any]) -> None:
+    """Publish one weather event using location as the Kafka message key."""
     key = str(event.get("weather_location_name") or event.get("location_query", "unknown"))
     metadata = producer.send(topic, key=key, value=event).get(timeout=30)
     producer.flush()
@@ -144,6 +149,8 @@ def main() -> int:
     producer = None
     topic    = None
     if OUTPUT_MODE == "kafka":
+        # In stdout mode this service is useful for local API testing.
+        # In kafka mode it becomes part of the streaming pipeline.
         bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVERS", DEFAULT_KAFKA_BOOTSTRAP)
         topic     = os.getenv("KAFKA_TOPIC", DEFAULT_KAFKA_TOPIC)
         producer  = create_kafka_producer(bootstrap)

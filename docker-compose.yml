@@ -1,14 +1,280 @@
 services:
+  # Single-node Kafka broker used by all local producers and consumers.
+  # Producers write JSON events here; Spark and Kafka Connect read from it.
+  broker:
+    image: confluentinc/cp-kafka:7.6.1
+    hostname: broker
+    container_name: broker
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:29093
+      KAFKA_LISTENERS: PLAINTEXT://broker:29092,CONTROLLER://broker:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    networks:
+      - towerhealth
+    restart: unless-stopped
+
+  # Schema Registry is not needed right now because the producers send plain JSON.
+  # Keep this block as a future option if we move to Avro, Protobuf, or JSON Schema.
+  # schema-registry:
+  #   image: confluentinc/cp-schema-registry:7.6.1
+  #   hostname: schema-registry
+  #   container_name: schema-registry
+  #   depends_on:
+  #     - broker
+  #   ports:
+  #     - "8082:8081"
+  #   environment:
+  #     SCHEMA_REGISTRY_HOST_NAME: schema-registry
+  #     SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: broker:29092
+  #     SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+  #   networks:
+  #     - towerhealth
+  #   restart: unless-stopped
+
+  connect:
+    # Kafka Connect worker. It loads the Confluent S3 Sink plugin at startup
+    # so we can persist Kafka topic data into an S3 bucket.
+    image: confluentinc/cp-kafka-connect:7.6.1
+    hostname: connect
+    container_name: connect
+    depends_on:
+      - broker
+    ports:
+      - "8083:8083"
+    command:
+      - bash
+      - -c
+      - |
+        confluent-hub install --no-prompt confluentinc/kafka-connect-s3:latest
+        /etc/confluent/docker/run
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: broker:29092
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_GROUP_ID: towerhealth-connect
+      CONNECT_CONFIG_STORAGE_TOPIC: towerhealth-connect-configs
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_TOPIC: towerhealth-connect-offsets
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_TOPIC: towerhealth-connect-status
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    networks:
+      - towerhealth
+    restart: unless-stopped
+
+  s3-connector-init:
+    # One-shot helper container that waits for Kafka Connect, then creates or
+    # updates the S3 sink connector through the Kafka Connect REST API.
+    image: curlimages/curl:8.10.1
+    container_name: s3-connector-init
+    depends_on:
+      - connect
+    environment:
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-towerhealth-bronze}
+      S3_REGION: ${AWS_REGION:-us-east-1}
+      S3_PREFIX: ${S3_PREFIX:-topics}
+      S3_FLUSH_SIZE: ${S3_FLUSH_SIZE:-1000}
+      S3_ROTATE_INTERVAL_MS: ${S3_ROTATE_INTERVAL_MS:-900000}
+    command:
+      - sh
+      - -c
+      - |
+        until curl -fsS http://connect:8083/connectors >/dev/null; do
+          echo "Waiting for Kafka Connect..."
+          sleep 5
+        done
+        # The time partitioner controls S3 folders. Kafka Connect still names
+        # objects as topic+partition+offset, which is its built-in behavior.
+        curl -fsS -X PUT http://connect:8083/connectors/s3-bronze-sink/config \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"connector.class\": \"io.confluent.connect.s3.S3SinkConnector\",
+            \"tasks.max\": \"1\",
+            \"topics\": \"ran_telemetry,weather_events\",
+            \"s3.bucket.name\": \"$${S3_BUCKET_NAME}\",
+            \"s3.region\": \"$${S3_REGION}\",
+            \"topics.dir\": \"$${S3_PREFIX}\",
+            \"flush.size\": \"$${S3_FLUSH_SIZE}\",
+            \"rotate.interval.ms\": \"$${S3_ROTATE_INTERVAL_MS}\",
+            \"storage.class\": \"io.confluent.connect.s3.storage.S3Storage\",
+            \"format.class\": \"io.confluent.connect.s3.format.json.JsonFormat\",
+            \"partitioner.class\": \"io.confluent.connect.storage.partitioner.TimeBasedPartitioner\",
+            \"path.format\": \"'year'=YYYY/'month'=MM/'day'=dd\",
+            \"partition.duration.ms\": \"900000\",
+            \"timestamp.extractor\": \"Wallclock\",
+            \"locale\": \"en-US\",
+            \"timezone\": \"UTC\",
+            \"schema.compatibility\": \"NONE\"
+          }"
+    networks:
+      - towerhealth
+    restart: "no"
+
+  kafka-ui:
+    # Browser UI for checking topics, messages, consumer groups, and connector state.
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - broker
+      - connect
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: towerhealth
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker:29092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+    networks:
+      - towerhealth
+    restart: unless-stopped
+
+  postgres:
+    # Stores the rows Spark consumes from Kafka so the dashboard can query them.
+    image: postgres:16-alpine
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-towerhealth}
+      POSTGRES_USER: ${POSTGRES_USER:-towerhealth}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-towerhealth}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./services/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - towerhealth
+    restart: unless-stopped
+
+  spark-master:
+    # Spark cluster coordinator. The streaming job submits to this master URL.
+    image: apache/spark:3.5.1
+    container_name: spark-master
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+    ports:
+      - "7077:7077"
+      - "8084:8080"
+    networks:
+      - towerhealth
+    restart: unless-stopped
+
+  spark-worker:
+    # Spark executor node that runs the work assigned by spark-master.
+    image: apache/spark:3.5.1
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+    networks:
+      - towerhealth
+    restart: unless-stopped
+
+  spark-stream:
+    # Structured Streaming job: Kafka topics -> kafka_events table in Postgres.
+    image: apache/spark:3.5.1
+    container_name: spark-stream
+    user: root
+    depends_on:
+      - broker
+      - postgres
+      - spark-master
+      - spark-worker
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker:29092}
+      KAFKA_TOPICS: ${SPARK_KAFKA_TOPICS:-ran_telemetry,weather_events}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-towerhealth}
+      POSTGRES_USER: ${POSTGRES_USER:-towerhealth}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-towerhealth}
+      SPARK_CHECKPOINT_DIR: /tmp/towerhealth-checkpoints
+      HOME: /tmp
+    volumes:
+      - ./services/spark_streaming:/opt/towerhealth/spark_streaming:ro
+      - spark_checkpoints:/tmp/towerhealth-checkpoints
+      - spark_ivy:/tmp/.ivy2
+    command:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /tmp/.ivy2/cache /tmp/.ivy2/jars
+        /opt/spark/bin/spark-submit \
+          --master spark://spark-master:7077 \
+          --conf spark.jars.ivy=/tmp/.ivy2 \
+          --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.4 \
+          /opt/towerhealth/spark_streaming/stream_kafka_to_postgres.py
+    networks:
+      - towerhealth
+    restart: unless-stopped
+
+  streamlit:
+    # Simple realtime dashboard that reads the kafka_events table from Postgres.
+    image: python:3.11-slim
+    container_name: streamlit
+    depends_on:
+      - postgres
+    ports:
+      - "8501:8501"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-towerhealth}
+      POSTGRES_USER: ${POSTGRES_USER:-towerhealth}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-towerhealth}
+    volumes:
+      - ./services/streamlit_dashboard:/app:ro
+    working_dir: /app
+    command:
+      - sh
+      - -c
+      - |
+        pip install --no-cache-dir -r requirements.txt
+        streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+    networks:
+      - towerhealth
+    restart: unless-stopped
 
   ran-generator:
+    # Synthetic RAN telemetry source. In kafka mode it writes to ran_telemetry.
     build:
       context: ./services/ran_generator
     container_name: ran-generator
+    depends_on:
+      - broker
     environment:
-      OUTPUT_MODE:             ${RAN_OUTPUT_MODE:-stdout}
-      RAN_INTERVAL_SECONDS:    ${RAN_INTERVAL_SECONDS:-30}
-      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka-broker-1:9092}
-      KAFKA_TOPIC:             ${RAN_KAFKA_TOPIC:-ran_telemetry}
+      OUTPUT_MODE: ${RAN_OUTPUT_MODE:-stdout}
+      RAN_INTERVAL_SECONDS: ${RAN_INTERVAL_SECONDS:-30}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker:29092}
+      KAFKA_TOPIC: ${RAN_KAFKA_TOPIC:-ran_telemetry}
     volumes:
       - ran_data:/data
     networks:
@@ -16,27 +282,32 @@ services:
     restart: unless-stopped
 
   weather-producer:
+    # WeatherAPI source. In kafka mode it writes weather snapshots to weather_events.
     build:
       context: ./services/weather_producer
     container_name: weather-producer
+    depends_on:
+      - broker
     environment:
-      OUTPUT_MODE:             ${WEATHER_OUTPUT_MODE:-stdout}
-      WEATHERAPI_KEY:          ${WEATHERAPI_KEY}
-      WEATHER_LOCATION:        ${WEATHER_LOCATION:-Cairo}
-      WEATHER_LAT:             ${WEATHER_LAT:-}
-      WEATHER_LON:             ${WEATHER_LON:-}
-      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka-broker-1:9092}
-      KAFKA_TOPIC:             ${WEATHER_KAFKA_TOPIC:-weather_events}
-      WEATHER_POLL_SECONDS:    ${WEATHER_POLL_SECONDS:-300}
+      OUTPUT_MODE: ${WEATHER_OUTPUT_MODE:-stdout}
+      WEATHERAPI_KEY: ${WEATHERAPI_KEY}
+      WEATHER_LOCATION: ${WEATHER_LOCATION:-Cairo}
+      WEATHER_LAT: ${WEATHER_LAT:-}
+      WEATHER_LON: ${WEATHER_LON:-}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker:29092}
+      KAFKA_TOPIC: ${WEATHER_KAFKA_TOPIC:-weather_events}
+      WEATHER_POLL_SECONDS: ${WEATHER_POLL_SECONDS:-300}
     networks:
       - towerhealth
     restart: unless-stopped
 
-# ── Add your Kafka broker service here when ready ──────────────────────────
-
 volumes:
+  pg_data:
   ran_data:
+  spark_checkpoints:
+  spark_ivy:
 
 networks:
   towerhealth:
+    name: towerhealth
     driver: bridge

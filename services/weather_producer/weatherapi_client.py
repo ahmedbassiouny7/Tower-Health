@@ -54,6 +54,7 @@ def fetch_current_weather(
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Fetch current weather data from WeatherAPI.com."""
+    # WeatherAPI accepts either a city name ("Cairo") or "lat,lon".
     query = urlencode(
         {
             "key": api_key,
@@ -86,6 +87,8 @@ def fetch_current_weather(
 
 def map_to_tower_weather_fields(data: dict[str, Any]) -> dict[str, Any]:
     """Map WeatherAPI current response to the Tower Health weather schema."""
+    # The API response is nested. This flattens only the fields the rest of the
+    # TowerHealth pipeline needs.
     current = data.get("current") or {}
     location = data.get("location") or {}
     condition = current.get("condition") or {}
@@ -107,7 +110,7 @@ def map_to_tower_weather_fields(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def project_weather_fields(weather: dict[str, Any]) -> dict[str, Any]:
-    """Keep only the five weather fields defined in the NetPulse source schema."""
+    """Keep only the five weather fields defined in the TowerHealth source schema."""
     return {
         "weather_temperature_c": weather.get("weather_temperature_c"),
         "weather_humidity_pct": weather.get("weather_humidity_pct"),
@@ -139,6 +142,7 @@ def enrich_tower_message(message: dict[str, Any], weather: dict[str, Any]) -> di
 
 
 def build_location(args: argparse.Namespace) -> str:
+    """Resolve CLI inputs into one WeatherAPI query string."""
     if args.location:
         return args.location
 
@@ -194,7 +198,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--project-fields-only",
         action="store_true",
-        help="Output only the five NetPulse weather source fields.",
+        help="Output only the five TowerHealth weather source fields.",
     )
     parser.add_argument(
         "--raw",
@@ -226,6 +230,8 @@ def main(argv: list[str]) -> int:
         return 2
 
     try:
+        # The CLI supports three output shapes: raw API response, mapped weather
+        # fields, or an existing tower message enriched with weather fields.
         location = build_location(args)
         raw_weather = fetch_current_weather(args.api_key, location, args.timeout)
         mapped_weather = map_to_tower_weather_fields(raw_weather)
