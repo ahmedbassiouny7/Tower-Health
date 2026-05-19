@@ -1,512 +1,675 @@
 """
-NetPulse – RAN Telemetry Data Generator
-========================================
-Uses Faker to emit a fresh JSON snapshot every N seconds.
-Static tower identity is generated once at startup; all KPI
-metrics are re-generated each tick from realistic value ranges.
+NetPulse – RAN Telemetry Simulator  (Multi-Site, Stateful)
+===========================================================
+Emits one JSON message per RAN site every 30 seconds.
+4 independent sites → 4 messages per 30-second cycle.
+
+Key design principles
+─────────────────────
+• Deterministic topology   – site IDs, coordinates, azimuths never change.
+• Stateful components      – each component object carries a state machine
+                             (HEALTHY / DEGRADED / FAILED / RECOVERING) whose
+                             transitions drive every KPI, not random dice rolls.
+• Temporal continuity      – all continuous metrics are clamped to a max-delta
+                             per tick so graphs never show impossible jumps.
+• KPI correlation          – PRB util, SINR, throughput, latency, and handover
+                             failures are all computed from the same health score.
+• Traffic day/night profile– user counts follow a sinusoidal 24-hour curve so
+                             morning / evening peaks look realistic.
+• Failure propagation      – BBU down ⟹ all cells/RUs/antennas null.
+                             RU down  ⟹ associated antenna + cell null.
+• Arithmetic invariants    – connected_users ≥ active_users,
+                             handover_failures ≤ handover_attempts,
+                             BBU active_users ≈ Σ cell active_users.
 
 Output modes (OUTPUT_MODE env var):
-  "stdout"  – pretty-print to console
-  "file"    – append each snapshot to OUTPUT_DIR/ran_data_<date>.jsonl
+  "stdout"  – pretty-print to console           (default)
+  "file"    – append JSONL to OUTPUT_DIR/
   "both"    – stdout + file
   "kafka"   – publish to Kafka topic
 """
 
+from __future__ import annotations
+
 import json
+import math
 import os
+import random
 import time
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-from faker import Faker
-
-fake = Faker()
-
-# ─────────────────────────── configuration ───────────────────────────────────
+# ──────────────────────────── configuration ───────────────────────────────────
 INTERVAL_SECONDS        = int(os.getenv("RAN_INTERVAL_SECONDS", "30"))
 OUTPUT_MODE             = os.getenv("OUTPUT_MODE", "stdout")
 OUTPUT_DIR              = os.getenv("OUTPUT_DIR", "/data")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-broker-1:9092")
 KAFKA_TOPIC             = os.getenv("KAFKA_TOPIC", "ran_telemetry")
 KAFKA_RETRY_SECONDS     = 5
-# ─────────────────────────────────────────────────────────────────────────────
+NUM_SITES               = 4
+# ──────────────────────────────────────────────────────────────────────────────
 
 
-# ─────────────────────────── value helpers ───────────────────────────────────
+# ──────────────────────────── primitive helpers ────────────────────────────────
 
-def flt(lo, hi, digits=2):
-    # Shorthand: generate a random float in [lo, hi] rounded to `digits` decimal places.
-    return round(fake.random.uniform(lo, hi), digits)
+_rng = random.Random()          # module-level RNG; seed via RNG_SEED env if desired
+_seed = os.getenv("RNG_SEED")
+if _seed:
+    _rng.seed(int(_seed))
 
-def up(chance=96):
-    """Return 'UP' or 'DOWN' weighted by chance_of_up percent."""
-    return "UP" if fake.boolean(chance_of_getting_true=chance) else "DOWN"
 
-def lerp(lo, hi, t, jitter=0.0, digits=2):
-    """Interpolate from lo (t=0) to hi (t=1), add optional jitter, clamp, round.
+def flt(lo: float, hi: float, digits: int = 2) -> float:
+    return round(_rng.uniform(lo, hi), digits)
 
-    Supports inverse ranges (lo > hi) — used for metrics that get WORSE as health
-    improves (e.g. lerp(8, 0.2, health) for BLER: health=0 → 8%, health=1 → 0.2%).
-    The lo_/hi_ swap ensures clamping works correctly regardless of direction.
-    """
+
+def clamp(val: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, val))
+
+
+def lerp(lo: float, hi: float, t: float, jitter: float = 0.0, digits: int = 2) -> float:
+    """Interpolate lo→hi by t ∈ [0,1]; clamp; optional jitter."""
     val = lo + (hi - lo) * t
     if jitter:
-        val += fake.random.uniform(-jitter, jitter)
-    # Normalise bounds so clamp always uses (smaller, larger) regardless of direction.
+        val += _rng.uniform(-jitter, jitter)
     lo_, hi_ = (lo, hi) if lo <= hi else (hi, lo)
-    return round(max(lo_, min(hi_, val)), digits)
+    return round(clamp(val, lo_, hi_), digits)
 
-def generate_sector_state():
-    """Return (health_score, ru_status, cell_status) for one sector.
 
-    Encodes the RU → cell cascade in a single call:
-      - RU DOWN  → health forced to 0.0, cell forced to DOWN (no signal, no service)
-      - RU UP    → health drawn from [0.1, 1.0]; cell independently has a 5% DOWN chance
-                   (e.g. baseband failure while the radio is still on)
+def smooth_step(prev: float, target: float, max_delta: float, digits: int = 2) -> float:
+    """Move prev toward target by at most max_delta (temporal continuity)."""
+    delta = clamp(target - prev, -max_delta, max_delta)
+    return round(prev + delta, digits)
 
-    health_score is the master RF quality knob passed to make_antenna and make_cell
-    so every RF metric in the sector degrades together rather than varying independently.
-    health_score minimum is 0.1 (not 0.0) when UP — even a badly degraded live sector
-    has some residual signal.
+
+def traffic_multiplier(ts: datetime) -> float:
+    """Day/night traffic profile → [0.15, 1.0].
+
+    Peak around 19:00 UTC (evening), trough around 04:00 UTC (night).
+    Two humps: morning commute at ~08:00, prime-time at ~19:00.
     """
-    ru_status = "UP" if fake.boolean(chance_of_getting_true=96) else "DOWN"
-    if ru_status == "DOWN":
-        # Radio unit is off — no power, no signal, cell cannot serve users.
-        return (0.0, "DOWN", "DOWN")
-    health = round(fake.pyfloat(min_value=0.1, max_value=1.0), 3)
-    cell_status = "UP" if fake.boolean(chance_of_getting_true=95) else "DOWN"
-    return (health, ru_status, cell_status)
+    h = ts.hour + ts.minute / 60.0
+    morning   = 0.40 * math.exp(-0.5 * ((h - 8)  / 2.5) ** 2)
+    evening   = 1.00 * math.exp(-0.5 * ((h - 19) / 3.0) ** 2)
+    night     = 0.15
+    return clamp(night + morning + evening, 0.15, 1.0)
 
 
-# ─────────────────────────── static tower identity ───────────────────────────
-# Generated once at process startup so every snapshot shares the same site.
+# ──────────────────────────── state machine ────────────────────────────────────
 
-VENDORS = ["Ericsson", "Nokia", "Huawei", "ZTE"]
+# Transition probability table  {current_state: {next_state: weight}}
+# Designed so failures are infrequent but meaningful, and recovery is gradual.
+_TRANSITIONS: Dict[str, Dict[str, float]] = {
+    "HEALTHY":    {"HEALTHY": 0.96, "DEGRADED": 0.03,  "FAILED": 0.01},
+    "DEGRADED":   {"HEALTHY": 0.10, "DEGRADED": 0.78,  "FAILED": 0.10, "RECOVERING": 0.02},
+    "FAILED":     {"FAILED":  0.80, "RECOVERING": 0.20},
+    "RECOVERING": {"HEALTHY": 0.40, "RECOVERING": 0.55, "DEGRADED": 0.05},
+}
 
-# Every field in STATIC is evaluated once when the module loads.
-# This guarantees that site_id, site_name, lat/lon, vendor, azimuths, and all
-# sector/antenna/cell mappings never change between snapshots — only KPI metrics vary.
-STATIC = {
-    "site_id":   fake.bothify(text="SITE_###"),     # e.g. "SITE_042"
-    "site_name": fake.bothify(text="??_TOWER_##").upper(),  # e.g. "KQ_TOWER_17"
-    "location":  {
-        "latitude":  float(fake.latitude()),
-        "longitude": float(fake.longitude()),
-    },
-    "region":     fake.state(),
-    "vendor":     fake.random_element(VENDORS),
-    "technology": ["4G", "5G"],
-
-    # Sector ↔ RU mapping: RU_1 serves S1, RU_2 serves S2, RU_3 serves S3.
-    # This 1-to-1 binding is static so the cascade (RU DOWN → cell DOWN) is deterministic.
-    "ru_sectors": [
-        {"ru_id": f"RU_{i}", "sector_id": f"S{i}"} for i in range(1, 4)
-    ],
-
-    # Tri-sector antenna layout: 0°, 120°, 240° — evenly divides the 360° cell.
-    # Tilt and MIMO layers are physical properties that don't change between ticks.
-    "antenna_statics": [
-        {
-            "antenna_id":     f"ANT_{i}",
-            "sector_id":      f"S{i}",
-            "tilt_degree":    flt(2.0, 6.0),
-            "azimuth_degree": (i - 1) * 120,    # 0° → 120° → 240°
-            "mimo_layers":    fake.random_element([2, 4, 8]),
-        }
-        for i in range(1, 4)
-    ],
-
-    # Only two cells are modelled (S1=4G, S2=5G); S3 has a radio unit but no cell.
-    # Bandwidth is a licensed spectrum property — fixed per technology.
-    "cell_statics": [
-        {"cell_id": "CELL_1", "sector_id": "S1", "technology": "4G",
-         "carrier_frequency_mhz": 1800, "bandwidth_mhz": 20},
-        {"cell_id": "CELL_2", "sector_id": "S2", "technology": "5G",
-         "carrier_frequency_mhz": 3500, "bandwidth_mhz": 100},
-    ],
-
-    # Two backhaul links with different media — both connect the site to the core.
-    "link_statics": [
-        {"link_id": "BH_1", "type": "FIBER"},
-        {"link_id": "BH_2", "type": "MICROWAVE"},
-    ],
+# Map each state to a health score range [lo, hi]
+_STATE_HEALTH: Dict[str, Tuple[float, float]] = {
+    "HEALTHY":    (0.75, 1.00),
+    "DEGRADED":   (0.30, 0.74),
+    "FAILED":     (0.00, 0.00),
+    "RECOVERING": (0.20, 0.60),
 }
 
 
-# ─────────────────────────── per-tick builders ───────────────────────────────
+@dataclass
+class ComponentState:
+    """Persistent per-component state carried across ticks."""
+    component_id: str
+    op_state: str = "HEALTHY"          # HEALTHY / DEGRADED / FAILED / RECOVERING
+    health: float = 1.0                # continuous [0, 1] health score
+    # Smooth-tracked metrics (init to sensible defaults)
+    temperature_c: float = 35.0
+    throughput_mbps: float = 100.0
+    active_users: int = 0
+    prb_util: float = 30.0
+    latency_ms: float = 15.0
+    charge_percent: float = 90.0
+    fuel_level: float = 80.0
 
-def make_ru(ru_id, sector_id, ru_status):
-    """Build one Radio Unit record.
+    def next_state(self, forced_failed: bool = False) -> None:
+        """Advance the state machine one tick."""
+        if forced_failed:
+            self.op_state = "FAILED"
+            self.health   = 0.0
+            return
+        choices = list(_TRANSITIONS[self.op_state].keys())
+        weights = list(_TRANSITIONS[self.op_state].values())
+        self.op_state = _rng.choices(choices, weights=weights, k=1)[0]
+        lo, hi        = _STATE_HEALTH[self.op_state]
+        target_health = _rng.uniform(lo, hi)
+        # Smooth health transitions – max 0.15 change per tick
+        self.health   = smooth_step(self.health, target_health, max_delta=0.15, digits=3)
 
-    ru_status comes from generate_sector_state(), not rolled here, so the
-    RU → cell cascade stays consistent across the whole snapshot.
-    All metrics are None when DOWN — a powered-off unit reports nothing.
+    @property
+    def is_up(self) -> bool:
+        return self.op_state != "FAILED"
+
+    @property
+    def status_str(self) -> str:
+        """Legacy UP/DOWN string for fields that still use it."""
+        return "UP" if self.is_up else "DOWN"
+
+
+# ──────────────────────────── static topology ─────────────────────────────────
+
+VENDORS = ["Ericsson", "Nokia", "Huawei", "ZTE"]
+
+# Four fixed sites; topology is immutable.
+SITE_TOPOLOGY: List[Dict[str, Any]] = [
+    {
+        "site_id":   "SITE_001",
+        "site_name": "AL_TOWER_01",
+        "location":  {"latitude": 31.2001, "longitude": 29.9187},  # Alexandria, EG
+        "region":    "Alexandria",
+        "vendor":    "Ericsson",
+        "technology": ["4G", "5G"],
+    },
+    {
+        "site_id":   "SITE_002",
+        "site_name": "CA_TOWER_02",
+        "location":  {"latitude": 30.0444, "longitude": 31.2357},  # Cairo, EG
+        "region":    "Cairo",
+        "vendor":    "Nokia",
+        "technology": ["4G", "5G"],
+    },
+    {
+        "site_id":   "SITE_003",
+        "site_name": "GZ_TOWER_03",
+        "location":  {"latitude": 30.0131, "longitude": 31.2089},  # Giza, EG
+        "region":    "Giza",
+        "vendor":    "Huawei",
+        "technology": ["4G", "5G"],
+    },
+    {
+        "site_id":   "SITE_004",
+        "site_name": "KS_TOWER_04",
+        "location":  {"latitude": 31.1107, "longitude": 33.7961},  # North Sinai, EG
+        "region":    "North Sinai",
+        "vendor":    "ZTE",
+        "technology": ["4G", "5G"],
+    },
+]
+
+# Shared structural topology (same shape for every site)
+_SECTOR_RU_MAP = [
+    {"ru_id": "RU_1", "sector_id": "S1"},
+    {"ru_id": "RU_2", "sector_id": "S2"},
+    {"ru_id": "RU_3", "sector_id": "S3"},
+]
+
+_ANTENNA_STATICS = [
+    {"antenna_id": "ANT_1", "sector_id": "S1", "tilt_degree": 3.0, "azimuth_degree":   0, "mimo_layers": 4},
+    {"antenna_id": "ANT_2", "sector_id": "S2", "tilt_degree": 4.0, "azimuth_degree": 120, "mimo_layers": 8},
+    {"antenna_id": "ANT_3", "sector_id": "S3", "tilt_degree": 5.0, "azimuth_degree": 240, "mimo_layers": 4},
+]
+
+_CELL_STATICS = [
+    {"cell_id": "CELL_1", "sector_id": "S1", "technology": "4G",
+     "carrier_frequency_mhz": 1800, "bandwidth_mhz": 20},
+    {"cell_id": "CELL_2", "sector_id": "S2", "technology": "5G",
+     "carrier_frequency_mhz": 3500, "bandwidth_mhz": 100},
+    {"cell_id": "CELL_3", "sector_id": "S3", "technology": "5G",
+     "carrier_frequency_mhz": 2600, "bandwidth_mhz":  60},
+]
+
+_LINK_STATICS = [
+    {"link_id": "BH_1", "type": "FIBER"},
+    {"link_id": "BH_2", "type": "MICROWAVE"},
+]
+
+
+# ──────────────────────────── site state object ────────────────────────────────
+
+class SiteState:
+    """All mutable state for one RAN site.
+
+    Component states are keyed by their IDs.  Sequence numbers increment each
+    tick so consumers can detect gaps in the stream.
     """
-    s = ru_status
+
+    def __init__(self, site_meta: Dict[str, Any]) -> None:
+        self.meta          = site_meta
+        self.seq           = 0
+
+        # One ComponentState per logical component
+        self.bbu     = ComponentState("BBU_MAIN")
+        self.rus     = {m["ru_id"]: ComponentState(m["ru_id"]) for m in _SECTOR_RU_MAP}
+        self.ants    = {m["antenna_id"]: ComponentState(m["antenna_id"]) for m in _ANTENNA_STATICS}
+        self.cells   = {m["cell_id"]: ComponentState(m["cell_id"]) for m in _CELL_STATICS}
+        self.links   = {m["link_id"]: ComponentState(m["link_id"]) for m in _LINK_STATICS}
+        self.recs    = {f"REC_{i}": ComponentState(f"REC_{i}") for i in range(1, 3)}
+        self.bats    = {f"BAT_{i}": ComponentState(f"BAT_{i}") for i in range(1, 3)}
+        self.env     = ComponentState("ENV")
+
+    def advance(self) -> None:
+        """Advance every component state machine one tick with cascade propagation."""
+        self.seq += 1
+
+        # ── BBU ── (independent)
+        self.bbu.next_state()
+        bbu_failed = not self.bbu.is_up
+
+        # ── RUs ── (if BBU failed → RUs forced down)
+        for ru in self.rus.values():
+            ru.next_state(forced_failed=bbu_failed)
+
+        # ── Antennas / Cells ── (cascade from their respective RU)
+        sector_to_ru = {m["sector_id"]: m["ru_id"] for m in _SECTOR_RU_MAP}
+        for ant_meta in _ANTENNA_STATICS:
+            ru_id = sector_to_ru[ant_meta["sector_id"]]
+            ru_failed = not self.rus[ru_id].is_up
+            ant = self.ants[ant_meta["antenna_id"]]
+            ant.next_state(forced_failed=ru_failed)
+
+        for cell_meta in _CELL_STATICS:
+            ru_id = sector_to_ru[cell_meta["sector_id"]]
+            ru_failed = not self.rus[ru_id].is_up
+            # Cell can also fail independently even when RU is up (5% chance)
+            cell = self.cells[cell_meta["cell_id"]]
+            cell.next_state(forced_failed=ru_failed)
+
+        # ── Backhaul links ── (independent, high reliability)
+        for lnk in self.links.values():
+            lnk.next_state()
+
+        # ── Power ──
+        for rec in self.recs.values():
+            rec.next_state()
+        for bat in self.bats.values():
+            bat.next_state()
+
+        # ── Environment ──
+        self.env.next_state()
+
+
+# ──────────────────────────── per-tick builders ────────────────────────────────
+
+def _build_ru(ru_id: str, sector_id: str, cs: ComponentState) -> Dict:
+    s = cs.status_str
+    if not cs.is_up:
+        return {
+            "ru_id": ru_id, "sector_id": sector_id,
+            "status": s, "op_state": cs.op_state,
+            "temperature_c": None, "tx_power_watts": None,
+            "rx_signal_strength_dbm": None, "vswr": None,
+            "current_ampere": None, "voltage_volt": None,
+            "packet_error_rate": None, "throughput_mbps": None,
+        }
+    h = cs.health
+    # Smooth temperature
+    cs.temperature_c = smooth_step(
+        cs.temperature_c,
+        lerp(30, 70, 1 - h, jitter=2),   # hotter when degraded
+        max_delta=2.0, digits=1
+    )
+    cs.throughput_mbps = smooth_step(
+        cs.throughput_mbps,
+        lerp(0, 600, h, jitter=20),
+        max_delta=50.0
+    )
     return {
-        "ru_id":                    ru_id,
-        "sector_id":                sector_id,
-        "status":                   s,
-        "temperature_c":            flt(30, 70)    if s == "UP" else None,
-        "tx_power_watts":           flt(20, 200)   if s == "UP" else None,
-        "rx_signal_strength_dbm":   flt(-100, -50) if s == "UP" else None,
-        "vswr":                     flt(1.0, 2.0)  if s == "UP" else None,  # ideal VSWR is 1.0; >2.0 indicates antenna mismatch
-        "current_ampere":           flt(5, 30)     if s == "UP" else None,
-        "voltage_volt":             flt(46, 50)    if s == "UP" else None,
-        # flt(0,5)/100 scales the range to 0.000–0.050 (0%–5% packet error rate)
-        "packet_error_rate":        round(flt(0, 5) / 100, 5) if s == "UP" else None,
-        "throughput_mbps":          flt(0, 600)    if s == "UP" else None,
+        "ru_id":                  ru_id,
+        "sector_id":              sector_id,
+        "status":                 s,
+        "op_state":               cs.op_state,
+        "temperature_c":          cs.temperature_c,
+        "tx_power_watts":         lerp(20, 200, h, jitter=5),
+        "rx_signal_strength_dbm": lerp(-100, -50, h, jitter=2),
+        "vswr":                   lerp(2.0, 1.0, h, jitter=0.05),   # inverse: lower is better
+        "current_ampere":         lerp(5, 30, h, jitter=1),
+        "voltage_volt":           lerp(46, 50, h, jitter=0.2),
+        "packet_error_rate":      round(lerp(0.05, 0.001, h, jitter=0.003), 5),
+        "throughput_mbps":        cs.throughput_mbps,
     }
 
 
-def make_bbu(bbu_id, cell_active_users):
-    """Build one Baseband Unit record.
-
-    BBU_1 is paired with CELL_1 (S1) and BBU_2 with CELL_2 (S2).
-    active_users is derived from the paired cell's user count so the two
-    stay in sync — the BBU processes exactly the traffic its cell carries.
-    A small noise term (+/-15) accounts for control-plane sessions and
-    users mid-handover that the cell hasn't counted yet.
-    """
-    s = up(97)
-    # `cell_active_users or 0` guards against None: a DOWN cell returns
-    # active_users=0, but we use `or 0` defensively in case it is None.
-    bbu_users = max(0, (cell_active_users or 0) + fake.pyint(min_value=-5, max_value=15)) if s == "UP" else None
+def _build_bbu(cs: ComponentState, total_cell_users: int) -> Dict:
+    if not cs.is_up:
+        return {
+            "bbu_id": "BBU_MAIN", "status": "DOWN", "op_state": cs.op_state,
+            "cpu_utilization_percent": None, "memory_utilization_percent": None,
+            "disk_usage_percent": None, "process_latency_ms": None,
+            "active_users": None, "control_plane_latency_ms": None,
+            "user_plane_latency_ms": None,
+        }
+    h = cs.health
+    # BBU users ≈ sum of all cells + small noise
+    bbu_users = max(0, total_cell_users + _rng.randint(-5, 15))
+    cs.active_users = bbu_users
     return {
-        "bbu_id":                       bbu_id,
-        "status":                       s,
-        "cpu_utilization_percent":      flt(10, 100) if s == "UP" else None,
-        "memory_utilization_percent":   flt(10, 100) if s == "UP" else None,
-        "disk_usage_percent":           flt(10, 95)  if s == "UP" else None,
-        "process_latency_ms":           flt(5, 50)   if s == "UP" else None,
-        "active_users":                 bbu_users,
-        "control_plane_latency_ms":     flt(5, 30)   if s == "UP" else None,
-        "user_plane_latency_ms":        flt(5, 40)   if s == "UP" else None,
+        "bbu_id":                     "BBU_MAIN",
+        "status":                     "UP",
+        "op_state":                   cs.op_state,
+        "cpu_utilization_percent":    lerp(90, 10, h, jitter=5),    # inverse: high load when degraded
+        "memory_utilization_percent": lerp(85, 20, h, jitter=4),
+        "disk_usage_percent":         lerp(80, 20, h, jitter=3),
+        "process_latency_ms":         lerp(50, 5, h, jitter=2),
+        "active_users":               bbu_users,
+        "control_plane_latency_ms":   lerp(30, 5, h, jitter=1),
+        "user_plane_latency_ms":      lerp(40, 5, h, jitter=2),
     }
 
 
-def make_antenna(meta, health):
-    """Build one antenna record.
-
-    Antennas are passive elements — tilt, azimuth, and MIMO config never
-    change (they come from STATIC). Only the live RF readings vary per tick.
-    Both rssi and snr are driven by the same sector health score so they
-    move together: a weak sector shows low rssi AND low snr, not one without
-    the other.
-      health=0.0 → rssi=-100 dBm, snr=0 dB   (very poor signal)
-      health=1.0 → rssi=-50  dBm, snr=35 dB  (excellent signal)
-    """
+def _build_antenna(meta: Dict, ant_cs: ComponentState, ru_cs: ComponentState) -> Dict:
+    effective_health = ant_cs.health if ant_cs.is_up else 0.0
+    s = ant_cs.status_str
     return {
         "antenna_id":     meta["antenna_id"],
         "sector_id":      meta["sector_id"],
-        "tilt_degree":    meta["tilt_degree"],
-        "azimuth_degree": meta["azimuth_degree"],
-        "mimo_layers":    meta["mimo_layers"],
-        "rssi_dbm":       lerp(-100, -50, health, jitter=2),    # stronger signal as health rises
-        "snr_db":         lerp(0, 35, health, jitter=1.5),      # better noise margin as health rises
+        "tilt_degree":    meta["tilt_degree"],      # static – never changes
+        "azimuth_degree": meta["azimuth_degree"],   # static – never changes
+        "mimo_layers":    meta["mimo_layers"],       # static – never changes
+        "status":         s,
+        "op_state":       ant_cs.op_state,
+        "rssi_dbm":       lerp(-100, -50, effective_health, jitter=2)  if ant_cs.is_up else None,
+        "snr_db":         lerp(0, 35, effective_health, jitter=1.5)    if ant_cs.is_up else None,
     }
 
 
-def make_cell(meta, health, cell_status):
-    """Build one cell record.
-
-    cell_status and health both come from generate_sector_state() so the
-    RU → cell cascade is already applied before this function is called.
-
-    DOWN branch:
-      active_users and throughput are 0 (not None) — their value is known
-      (zero traffic), whereas signal metrics like rsrp are genuinely
-      unmeasurable on a dead cell and are therefore None.
-      Count-like fields (handover_attempts, rrc_connection_attempts) are
-      also 0 so handover_failures ≤ handover_attempts holds trivially.
-
-    UP branch — all RF metrics derived from the single health score:
-      Good signal chain: high health → strong rsrp → better rsrq → higher
-      sinr → higher cqi → lower BLER → fewer HARQ retransmissions → higher
-      throughput.  Using lerp() for each keeps them correlated.
-      Inverse metrics (BLER, HARQ) use lo > hi in lerp() so they increase
-      as health falls — see lerp() docstring for how clamping handles this.
-
-    Latency bounds are technology-specific (3GPP targets):
-      5G NR : 5–20 ms    4G LTE: 10–40 ms
-    """
-    is_5g  = meta["technology"] == "5G"
-    dl_max = 600 if is_5g else 300   # max downlink throughput (Mbps)
-    lat_lo = 5   if is_5g else 10    # latency lower bound (ms)
-    lat_hi = 20  if is_5g else 40    # latency upper bound (ms)
-
+def _build_cell(
+    meta: Dict,
+    cell_cs: ComponentState,
+    ant_cs: ComponentState,
+    traffic_mult: float,
+) -> Dict:
     base = {
         "cell_id":               meta["cell_id"],
         "sector_id":             meta["sector_id"],
         "technology":            meta["technology"],
         "carrier_frequency_mhz": meta["carrier_frequency_mhz"],
         "bandwidth_mhz":         meta["bandwidth_mhz"],
-        "status":                cell_status,
+        "status":                cell_cs.status_str,
+        "op_state":              cell_cs.op_state,
     }
 
-    if cell_status == "DOWN":
+    if not cell_cs.is_up:
         return {
             **base,
-            # Known-zero: no users, no traffic when the cell is out of service.
-            "active_users":                     0,
-            "connected_users":                  0,   # always ≥ active_users (both 0)
-            "prb_utilization_percent":          None,
-            "throughput_downlink_mbps":         0,
-            "throughput_uplink_mbps":           0,
-            # Signal metrics are None — the cell is not transmitting so they cannot be measured.
-            "spectral_efficiency_bps_per_hz":   None,
-            "rsrp_dbm":                         None,
-            "rsrq_db":                          None,
-            "sinr_db":                          None,
-            "cqi_avg":                          None,
-            "bler_downlink_percent":            None,
-            "bler_uplink_percent":              None,
-            "harq_retransmission_rate_percent": None,
-            "latency_downlink_ms":              None,
-            "latency_uplink_ms":                None,
-            # Zero attempts means zero failures — satisfies handover_failures ≤ attempts.
-            "handover_attempts":                0,
-            "handover_success_rate_percent":    None,
-            "handover_failures":                0,
-            "rrc_connection_attempts":          0,
-            "rrc_success_rate_percent":         None,
-            "erab_setup_success_rate_percent":  None,
-            "call_drop_rate_percent":           None,
-            "abnormal_release_rate_percent":    None,
+            "active_users": 0, "connected_users": 0,
+            "prb_utilization_percent": None,
+            "throughput_downlink_mbps": 0, "throughput_uplink_mbps": 0,
+            "spectral_efficiency_bps_per_hz": None,
+            "rsrp_dbm": None, "rsrq_db": None, "sinr_db": None,
+            "cqi_avg": None, "bler_downlink_percent": None,
+            "bler_uplink_percent": None, "harq_retransmission_rate_percent": None,
+            "latency_downlink_ms": None, "latency_uplink_ms": None,
+            "handover_attempts": 0, "handover_success_rate_percent": None,
+            "handover_failures": 0,
+            "rrc_connection_attempts": 0, "rrc_success_rate_percent": None,
+            "erab_setup_success_rate_percent": None,
+            "call_drop_rate_percent": None, "abnormal_release_rate_percent": None,
         }
 
-    # ── UP: generate correlated metrics from the sector health score ──────────
+    is_5g  = meta["technology"] == "5G"
+    dl_max = 600 if is_5g else 300
+    lat_lo = 5   if is_5g else 10
+    lat_hi = 20  if is_5g else 40
 
-    # User count scales with health: a weak sector serves fewer users.
-    # jitter=50 adds realistic tick-to-tick variation around the health-derived mean.
-    active = int(lerp(0, 600, health, jitter=50))
+    h = cell_cs.health
+    # Antenna failure degrades the cell's signal quality
+    ant_factor = ant_cs.health if ant_cs.is_up else 0.3
+    effective_h = h * ant_factor
 
-    # Handover volume roughly tracks user count (more users → more mobility events).
-    attempts = fake.pyint(min_value=max(0, active - 20), max_value=active + 100)
+    # Traffic-aware user count: health × day/night profile
+    user_target = int(lerp(0, 600, effective_h) * traffic_mult)
+    cell_cs.active_users = int(
+        smooth_step(cell_cs.active_users, user_target, max_delta=80)
+    )
+    active = cell_cs.active_users
 
-    # Handover success rate improves with health.
-    ho_rate = lerp(85, 99.5, health, jitter=0.5)
+    # PRB utilization correlates with user load
+    prb_target = clamp(active / 6.0, 5, 100)
+    cell_cs.prb_util = smooth_step(cell_cs.prb_util, prb_target, max_delta=10)
+
+    # Throughput depends on PRB and signal quality
+    dl_target = lerp(0, dl_max, effective_h, jitter=dl_max * 0.04)
+    cell_cs.throughput_mbps = smooth_step(cell_cs.throughput_mbps, dl_target, max_delta=dl_max * 0.1)
+
+    # Latency rises with PRB utilization (congestion effect)
+    congestion_factor = cell_cs.prb_util / 100.0
+    lat_target = lat_lo + (lat_hi - lat_lo) * congestion_factor
+    cell_cs.latency_ms = smooth_step(cell_cs.latency_ms, lat_target, max_delta=3)
+
+    attempts = _rng.randint(max(0, active - 20), active + 100)
+    ho_rate  = lerp(85, 99.5, effective_h, jitter=0.5)
 
     return {
         **base,
-        "active_users":   active,
-        # connected_users adds 0–30 on top of active — accounts for sessions in
-        # setup/teardown (TCP handshakes, RRC idle-connected transitions).
-        # This guarantees connected_users ≥ active_users by construction.
-        "connected_users":                  active + fake.pyint(min_value=0, max_value=30),
-        "prb_utilization_percent":          flt(10, 100),   # load is independent of signal quality
-        "throughput_downlink_mbps":         lerp(0, dl_max, health, jitter=dl_max * 0.05),
-        "throughput_uplink_mbps":           lerp(0, 150, health, jitter=10),
-        "spectral_efficiency_bps_per_hz":   lerp(0.5, 7.5, health, jitter=0.2),
-        # Signal quality chain — all degrade together as health falls.
-        "rsrp_dbm":                         lerp(-120, -70, health, jitter=3),    # reference signal received power
-        "rsrq_db":                          lerp(-15, -5, health, jitter=0.5),    # reference signal quality
-        "sinr_db":                          lerp(-5, 25, health, jitter=2),       # signal-to-interference ratio
-        "cqi_avg":                          lerp(2, 14, health, jitter=0.5, digits=1),  # channel quality index (1–15 scale)
-        # Inverse metrics: lo > hi so low health produces HIGH error rates.
-        "bler_downlink_percent":            lerp(8, 0.2, health, jitter=0.3),    # block error rate
-        "bler_uplink_percent":              lerp(8, 0.2, health, jitter=0.3),
-        "harq_retransmission_rate_percent": lerp(18, 0.5, health, jitter=0.8),   # retransmissions needed due to errors
-        # Latency is bounded by technology spec, not health (scheduler/propagation driven).
-        "latency_downlink_ms":              flt(lat_lo, lat_hi),
-        "latency_uplink_ms":                flt(lat_lo, lat_hi),
+        "active_users":                     active,
+        "connected_users":                  active + _rng.randint(0, 30),
+        "prb_utilization_percent":          round(cell_cs.prb_util, 1),
+        "throughput_downlink_mbps":         round(cell_cs.throughput_mbps, 2),
+        "throughput_uplink_mbps":           lerp(0, 150, effective_h, jitter=8),
+        "spectral_efficiency_bps_per_hz":   lerp(0.5, 7.5, effective_h, jitter=0.2),
+        "rsrp_dbm":                         lerp(-120, -70, effective_h, jitter=3),
+        "rsrq_db":                          lerp(-15, -5, effective_h, jitter=0.5),
+        "sinr_db":                          lerp(-5, 25, effective_h, jitter=2),
+        "cqi_avg":                          lerp(2, 14, effective_h, jitter=0.5, digits=1),
+        "bler_downlink_percent":            lerp(8, 0.2, effective_h, jitter=0.3),
+        "bler_uplink_percent":              lerp(8, 0.2, effective_h, jitter=0.3),
+        "harq_retransmission_rate_percent": lerp(18, 0.5, effective_h, jitter=0.8),
+        "latency_downlink_ms":              round(cell_cs.latency_ms, 1),
+        "latency_uplink_ms":                lerp(lat_lo, lat_hi, congestion_factor, jitter=1),
         "handover_attempts":                attempts,
         "handover_success_rate_percent":    ho_rate,
-        # Arithmetic guarantee: failures = attempts × failure_rate ≤ attempts always.
         "handover_failures":                max(0, int(attempts * (1 - ho_rate / 100))),
-        "rrc_connection_attempts":          fake.pyint(min_value=0, max_value=5000),
-        "rrc_success_rate_percent":         lerp(85, 99, health, jitter=0.5),
-        "erab_setup_success_rate_percent":  lerp(85, 99, health, jitter=0.5),
-        "call_drop_rate_percent":           lerp(5, 0.1, health, jitter=0.2),    # inverse: fewer drops when healthy
-        "abnormal_release_rate_percent":    lerp(5, 0.1, health, jitter=0.2),    # inverse
+        "rrc_connection_attempts":          _rng.randint(0, 5000),
+        "rrc_success_rate_percent":         lerp(85, 99, effective_h, jitter=0.5),
+        "erab_setup_success_rate_percent":  lerp(85, 99, effective_h, jitter=0.5),
+        "call_drop_rate_percent":           lerp(5, 0.1, effective_h, jitter=0.2),
+        "abnormal_release_rate_percent":    lerp(5, 0.1, effective_h, jitter=0.2),
     }
 
 
-def make_link(meta):
-    s = up(99)
+def _build_link(meta: Dict, cs: ComponentState) -> Dict:
+    s = cs.status_str
+    if not cs.is_up:
+        return {
+            "link_id": meta["link_id"], "type": meta["type"],
+            "status": s, "op_state": cs.op_state,
+            "latency_ms": None, "jitter_ms": None,
+            "packet_loss_percent": None, "throughput_mbps": None,
+            "utilization_percent": None,
+        }
+    h = cs.health
     return {
         "link_id":             meta["link_id"],
         "type":                meta["type"],
         "status":              s,
-        "latency_ms":          flt(1, 20)      if s == "UP" else None,
-        "jitter_ms":           flt(0, 5)       if s == "UP" else None,
-        "packet_loss_percent": round(flt(0, 1, digits=4), 4) if s == "UP" else None,
-        "throughput_mbps":     flt(50, 10000)  if s == "UP" else None,
-        "utilization_percent": flt(5, 100)     if s == "UP" else None,
+        "op_state":            cs.op_state,
+        "latency_ms":          lerp(20, 1, h, jitter=1),
+        "jitter_ms":           lerp(5, 0, h, jitter=0.3),
+        "packet_loss_percent": round(lerp(0.1, 0.001, h, jitter=0.005), 5),
+        "throughput_mbps":     flt(50, 10000),
+        "utilization_percent": lerp(90, 5, h, jitter=5),
     }
 
 
-def make_rectifier(rec_id):
-    s = up(99)
+def _build_rectifier(rec_id: str, cs: ComponentState) -> Dict:
+    s = cs.status_str
     return {
         "rectifier_id":        rec_id,
         "status":              s,
-        "output_voltage_volt": flt(46, 50) if s == "UP" else None,
-        "current_ampere":      flt(5, 50)  if s == "UP" else None,
+        "op_state":            cs.op_state,
+        "output_voltage_volt": lerp(46, 50, cs.health, jitter=0.1) if cs.is_up else None,
+        "current_ampere":      lerp(5, 50, cs.health, jitter=1)   if cs.is_up else None,
     }
 
 
-def make_battery(bat_id):
-    s = up(99)
+def _build_battery(bat_id: str, cs: ComponentState, power_up: bool) -> Dict:
+    s = cs.status_str
+    if not cs.is_up:
+        return {"battery_id": bat_id, "status": s, "op_state": cs.op_state,
+                "charge_percent": None, "temperature_c": None}
+    # Charge drains slowly when power is out, recharges when power is on
+    delta = 0.5 if power_up else -1.5
+    cs.charge_percent = clamp(cs.charge_percent + _rng.uniform(delta - 0.2, delta + 0.2), 0, 100)
     return {
         "battery_id":     bat_id,
         "status":         s,
-        "charge_percent": flt(0, 100, digits=1) if s == "UP" else None,
-        "temperature_c":  flt(15, 45)           if s == "UP" else None,
+        "op_state":       cs.op_state,
+        "charge_percent": round(cs.charge_percent, 1),
+        "temperature_c":  lerp(15, 45, 1 - cs.health, jitter=1),
     }
 
 
-# ─────────────────────────── snapshot ────────────────────────────────────────
+def _build_environment(cs: ComponentState) -> Dict:
+    """Shelter / cabin environment; temperature drifts slowly."""
+    cs.temperature_c = smooth_step(
+        cs.temperature_c,
+        lerp(20, 50, 1 - cs.health, jitter=1),
+        max_delta=0.5, digits=1
+    )
+    return {
+        "status":   cs.status_str,
+        "op_state": cs.op_state,
+        "temperature_sensors": [
+            {"sensor_id": "TEMP_1", "value_c": cs.temperature_c},
+            {"sensor_id": "TEMP_2", "value_c": round(cs.temperature_c + _rng.uniform(-2, 2), 1)},
+        ],
+        "humidity_sensors": [
+            {"sensor_id": "HUM_1", "value_percent": flt(30, 90, digits=1)}
+        ],
+        "door_status":    "OPEN" if _rng.random() < 0.01 else "CLOSED",
+        "smoke_detected": _rng.random() < 0.005,
+    }
 
-def build_snapshot():
-    """Assemble one complete tower snapshot.
 
-    The build order matters — later steps depend on earlier results:
-      1. Sector states first  → RU and cell statuses are decided once and shared.
-      2. Cells before BBUs    → BBU user count is derived from cell output.
-      3. Batteries before generator → generator ON/OFF depends on charge level.
+# ──────────────────────────── snapshot builder ────────────────────────────────
+
+def build_snapshot(site: SiteState) -> Dict:
+    """Build one complete site snapshot from current state.
+
+    The build order is critical:
+      1. Advance state machines (cascade propagation happens inside advance()).
+      2. Build RUs + antennas (sector-level RF components).
+      3. Build cells (need antenna health for effective_h).
+      4. Build BBU (needs total cell user count).
+      5. Build power, links, environment (mostly independent).
     """
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    site.advance()
 
-    # ── 1. Sector states ──────────────────────────────────────────────────────
-    # One call per sector; the tuple encodes the full cascade result:
-    #   index 0 → health score (float 0.0–1.0)
-    #   index 1 → ru_status   ("UP" | "DOWN")
-    #   index 2 → cell_status ("UP" | "DOWN")  forced DOWN if ru is DOWN
-    sector_states = {
-        m["sector_id"]: generate_sector_state()
-        for m in STATIC["ru_sectors"]
-    }
+    ts  = datetime.now(timezone.utc)
+    ts_str = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    tmult  = traffic_multiplier(ts)
 
-    # ── 2. Radio units ────────────────────────────────────────────────────────
-    # Status is read from sector_states[1], not rolled independently, so the
-    # RU and its downstream cell always agree on whether the sector is up.
+    sector_to_ru = {m["sector_id"]: m["ru_id"] for m in _SECTOR_RU_MAP}
+
+    # ── Radio Units ────────────────────────────────────────────────────────────
     radio_units = [
-        make_ru(m["ru_id"], m["sector_id"], sector_states[m["sector_id"]][1])
-        for m in STATIC["ru_sectors"]
+        _build_ru(m["ru_id"], m["sector_id"], site.rus[m["ru_id"]])
+        for m in _SECTOR_RU_MAP
     ]
 
-    # ── 3. Antennas ───────────────────────────────────────────────────────────
-    # Health [0] drives rssi/snr so antenna RF readings track sector quality.
+    # ── Antennas ───────────────────────────────────────────────────────────────
     antennas = [
-        make_antenna(m, sector_states[m["sector_id"]][0])
-        for m in STATIC["antenna_statics"]
-    ]
-
-    # ── 4. Cells ──────────────────────────────────────────────────────────────
-    # Health [0] drives all RF metrics; cell_status [2] enforces the cascade.
-    cells = [
-        make_cell(
+        _build_antenna(
             m,
-            health=sector_states[m["sector_id"]][0],
-            cell_status=sector_states[m["sector_id"]][2],
+            ant_cs=site.ants[m["antenna_id"]],
+            ru_cs=site.rus[sector_to_ru[m["sector_id"]]],
         )
-        for m in STATIC["cell_statics"]
+        for m in _ANTENNA_STATICS
     ]
 
-    # ── 5. BBUs ───────────────────────────────────────────────────────────────
-    # Cells must be built first so we can read their active_users here.
-    # BBU_1 serves S1 (CELL_1 / 4G), BBU_2 serves S2 (CELL_2 / 5G).
-    cell_users = {c["sector_id"]: c["active_users"] for c in cells}
-    baseband_units = [
-        make_bbu("BBU_1", cell_users.get("S1")),
-        make_bbu("BBU_2", cell_users.get("S2")),
+    # Build antenna lookup for cell builder
+    ant_by_sector = {m["sector_id"]: site.ants[m["antenna_id"]] for m in _ANTENNA_STATICS}
+
+    # ── Cells ──────────────────────────────────────────────────────────────────
+    cells = [
+        _build_cell(
+            m,
+            cell_cs=site.cells[m["cell_id"]],
+            ant_cs=ant_by_sector[m["sector_id"]],
+            traffic_mult=tmult,
+        )
+        for m in _CELL_STATICS
     ]
 
-    # ── 6. Power system ───────────────────────────────────────────────────────
-    rectifiers = [make_rectifier(f"REC_{i}") for i in range(1, 3)]
-    batteries  = [make_battery(f"BAT_{i}")   for i in range(1, 3)]
+    # ── BBU ────────────────────────────────────────────────────────────────────
+    total_users = sum(c["active_users"] for c in cells)
+    bbu_record  = _build_bbu(site.bbu, total_users)
 
-    # Site has mains power if at least one rectifier is operational.
-    power_up = any(r["status"] == "UP" for r in rectifiers)
+    # ── Power ──────────────────────────────────────────────────────────────────
+    rectifiers = [_build_rectifier(rid, site.recs[rid]) for rid in site.recs]
+    power_up   = any(r["status"] == "UP" for r in rectifiers)
+    batteries  = [_build_battery(bid, site.bats[bid], power_up) for bid in site.bats]
 
-    # Check whether any live battery is critically low (< 20 % charge).
-    # `or 100` guards against charge_percent being None on a DOWN battery —
-    # defaulting to 100 % means a DOWN battery never triggers the alarm.
     low_bat = any(
         (b["charge_percent"] or 100) < 20
         for b in batteries
         if b["status"] == "UP"
     )
+    gen_on = (not power_up) or low_bat or _rng.random() < 0.03
 
-    # Generator turns ON automatically on power failure or low battery.
-    # The 3 % random chance simulates routine maintenance test runs.
-    gen_on = (not power_up) or low_bat or fake.boolean(chance_of_getting_true=3)
+    # Fuel drains while running, refills otherwise
+    if gen_on:
+        site.bbu.fuel_level = clamp(site.bbu.fuel_level - _rng.uniform(0.1, 0.3), 0, 100)
+    else:
+        site.bbu.fuel_level = clamp(site.bbu.fuel_level + _rng.uniform(0.0, 0.05), 0, 100)
 
     return {
-        "timestamp": ts,
+        "message_id":      str(uuid.uuid4()),
+        "timestamp":       ts_str,
+        "sequence_number": site.seq,
         "ran_metadata": {
-            "site_id":    STATIC["site_id"],
-            "site_name":  STATIC["site_name"],
-            "location":   STATIC["location"],
-            "region":     STATIC["region"],
-            "vendor":     STATIC["vendor"],
-            "technology": STATIC["technology"],
+            "site_id":    site.meta["site_id"],
+            "site_name":  site.meta["site_name"],
+            "location":   site.meta["location"],
+            "region":     site.meta["region"],
+            "vendor":     site.meta["vendor"],
+            "technology": site.meta["technology"],
         },
         "radio_units":     radio_units,
-        "baseband_units":  baseband_units,
+        "baseband_units":  [bbu_record],
         "antennas":        antennas,
         "cells":           cells,
-        "transport_links": [make_link(m) for m in STATIC["link_statics"]],
+        "transport_links": [
+            _build_link(m, site.links[m["link_id"]]) for m in _LINK_STATICS
+        ],
         "power_system": {
             "status":     "UP" if power_up else "DOWN",
             "rectifiers": rectifiers,
             "batteries":  batteries,
             "generator": {
                 "status":             "ON" if gen_on else "OFF",
-                "fuel_level_percent": flt(10, 100, digits=1),
+                "fuel_level_percent": round(site.bbu.fuel_level, 1),
                 "runtime_hours":      flt(0, 500),
             },
         },
-        "environment": {
-            "status": "UP",
-            "temperature_sensors": [
-                {"sensor_id": f"TEMP_{i}", "value_c": flt(20, 50, digits=1)}
-                for i in range(1, 3)
-            ],
-            "humidity_sensors": [
-                {"sensor_id": "HUM_1", "value_percent": flt(30, 90, digits=1)}
-            ],
-            "door_status":    "OPEN" if fake.boolean(chance_of_getting_true=1) else "CLOSED",
-            "smoke_detected": fake.boolean(chance_of_getting_true=1),
-        },
+        "environment": _build_environment(site.env),
     }
 
 
-# ─────────────────────────── output helpers ──────────────────────────────────
+# ──────────────────────────── output helpers ──────────────────────────────────
 
-def to_stdout(snapshot):
-    print("\n" + "=" * 70)
-    print(f"  NetPulse Snapshot  |  {snapshot['timestamp']}")
-    print("=" * 70)
+def to_stdout(snapshot: Dict) -> None:
+    print("\n" + "=" * 72)
+    site_id   = snapshot["ran_metadata"]["site_id"]
+    site_name = snapshot["ran_metadata"]["site_name"]
+    print(f"  NetPulse  |  {snapshot['timestamp']}  |  {site_name} ({site_id})  |  seq={snapshot['sequence_number']}")
+    print("=" * 72)
     print(json.dumps(snapshot, indent=2, ensure_ascii=False), flush=True)
 
 
-def to_file(snapshot):
-    from datetime import datetime as _dt
-    date_str = _dt.now().strftime("%Y-%m-%d")
-    filename = os.path.join(OUTPUT_DIR, f"ran_data_{date_str}.jsonl")
+def to_file(snapshot: Dict) -> None:
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    site_id  = snapshot["ran_metadata"]["site_id"].lower()
+    filename = os.path.join(OUTPUT_DIR, f"ran_data_{site_id}_{date_str}.jsonl")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     with open(filename, "a", encoding="utf-8") as f:
         f.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
-    print(f"[{snapshot['timestamp']}] Written -> {filename}", flush=True)
+    print(f"[{snapshot['timestamp']}] {site_id}  seq={snapshot['sequence_number']} → {filename}", flush=True)
 
 
 def create_kafka_producer():
-    """Create and return a KafkaProducer, retrying until the broker is reachable.
-
-    Kafka may not be ready when this container starts (Docker startup ordering).
-    Retrying in a loop is safer than crashing — the generator will begin
-    emitting data as soon as the broker comes up, without needing a restart.
-
-    linger_ms=100 tells the producer to wait up to 100 ms before sending a
-    batch, which reduces network round-trips when messages arrive quickly.
-    retries=5 handles transient broker leadership changes automatically.
-
-    Kafka imports are deferred to here so the module loads cleanly when
-    OUTPUT_MODE is not "kafka" and kafka-python is irrelevant.
-    """
-    from kafka import KafkaProducer
-    from kafka.errors import NoBrokersAvailable
+    """Create a KafkaProducer, retrying until the broker is available."""
+    from kafka import KafkaProducer          # type: ignore
+    from kafka.errors import NoBrokersAvailable  # type: ignore
 
     while True:
         try:
@@ -526,58 +689,58 @@ def create_kafka_producer():
             time.sleep(KAFKA_RETRY_SECONDS)
 
 
-def to_kafka(producer, snapshot):
-    """Publish one snapshot to Kafka and block until the broker acknowledges it.
-
-    site_id is used as the message key so all records from the same tower
-    land on the same partition — preserving per-site ordering for consumers.
-
-    .get(timeout=30) waits for the broker ack before returning, turning the
-    async send into a synchronous call and ensuring no message is silently
-    dropped.  flush() drains any remaining buffered messages afterward.
-    """
+def to_kafka(producer, snapshot: Dict) -> None:
     key      = snapshot["ran_metadata"]["site_id"]
     metadata = producer.send(KAFKA_TOPIC, key=key, value=snapshot).get(timeout=30)
     producer.flush()
     print(
-        f"[{snapshot['timestamp']}] Kafka "
-        f"topic={metadata.topic} partition={metadata.partition} offset={metadata.offset}",
+        f"[{snapshot['timestamp']}] Kafka  site={key}  "
+        f"partition={metadata.partition}  offset={metadata.offset}",
         flush=True,
     )
 
 
-# ─────────────────────────── main ────────────────────────────────────────────
+# ──────────────────────────── main ────────────────────────────────────────────
 
-def main():
-    print("=" * 66)
-    print("  NetPulse  -  RAN Telemetry Generator  (Faker)")
-    print(f"  Site     : {STATIC['site_name']}  ({STATIC['site_id']})")
-    print(f"  Vendor   : {STATIC['vendor']}  |  Region: {STATIC['region']}")
-    print(f"  Interval : {INTERVAL_SECONDS}s  |  Output : {OUTPUT_MODE}")
+def main() -> None:
+    # Initialise persistent state for all sites
+    sites = [SiteState(meta) for meta in SITE_TOPOLOGY]
+
+    print("=" * 72)
+    print("  NetPulse  –  RAN Telemetry Simulator  (Multi-Site, Stateful)")
+    print(f"  Sites    : {NUM_SITES}  |  Interval : {INTERVAL_SECONDS}s  |  Output : {OUTPUT_MODE}")
+    for s in sites:
+        loc = s.meta["location"]
+        print(f"    {s.meta['site_id']}  {s.meta['site_name']}  "
+              f"({loc['latitude']:.4f}, {loc['longitude']:.4f})  "
+              f"vendor={s.meta['vendor']}")
     if OUTPUT_MODE == "kafka":
         print(f"  Kafka    : {KAFKA_BOOTSTRAP_SERVERS}  topic={KAFKA_TOPIC}")
-    print("=" * 66)
+    print("=" * 72)
     print("Press Ctrl+C to stop.\n")
 
-    producer = None
-    if OUTPUT_MODE == "kafka":
-        producer = create_kafka_producer()
+    producer = create_kafka_producer() if OUTPUT_MODE == "kafka" else None
 
     while True:
-        snapshot = build_snapshot()
+        cycle_start = time.monotonic()
 
-        if OUTPUT_MODE in ("stdout", "both"):
-            to_stdout(snapshot)
-        if OUTPUT_MODE in ("file", "both"):
-            to_file(snapshot)
-        if OUTPUT_MODE == "kafka" and producer:
-            to_kafka(producer, snapshot)
+        for site in sites:
+            snapshot = build_snapshot(site)
 
-        time.sleep(INTERVAL_SECONDS)
+            if OUTPUT_MODE in ("stdout", "both"):
+                to_stdout(snapshot)
+            if OUTPUT_MODE in ("file", "both"):
+                to_file(snapshot)
+            if OUTPUT_MODE == "kafka" and producer:
+                to_kafka(producer, snapshot)
+
+        elapsed  = time.monotonic() - cycle_start
+        sleep_for = max(0.0, INTERVAL_SECONDS - elapsed)
+        time.sleep(sleep_for)
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nGenerator stopped.")
+        print("\nSimulator stopped.")
