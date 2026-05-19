@@ -233,8 +233,9 @@ class SiteState:
     """
 
     def __init__(self, site_meta: Dict[str, Any]) -> None:
-        self.meta          = site_meta
-        self.seq           = 0
+        self.meta                    = site_meta
+        self.seq                     = 0
+        self.generator_runtime_hours: float = 0.0
 
         # One ComponentState per logical component
         self.bbu     = ComponentState("BBU_MAIN")
@@ -606,9 +607,12 @@ def build_snapshot(site: SiteState) -> Dict:
     )
     gen_on = (not power_up) or low_bat or _rng.random() < 0.03
 
-    # Fuel drains while running, refills otherwise
+    # Fuel drains while running, refills otherwise; runtime accumulates while on
     if gen_on:
         site.bbu.fuel_level = clamp(site.bbu.fuel_level - _rng.uniform(0.1, 0.3), 0, 100)
+        site.generator_runtime_hours = round(
+            site.generator_runtime_hours + INTERVAL_SECONDS / 3600, 2
+        )
     else:
         site.bbu.fuel_level = clamp(site.bbu.fuel_level + _rng.uniform(0.0, 0.05), 0, 100)
 
@@ -638,7 +642,7 @@ def build_snapshot(site: SiteState) -> Dict:
             "generator": {
                 "status":             "ON" if gen_on else "OFF",
                 "fuel_level_percent": round(site.bbu.fuel_level, 1),
-                "runtime_hours":      flt(0, 500),
+                "runtime_hours":      site.generator_runtime_hours,
             },
         },
         "environment": _build_environment(site.env),
