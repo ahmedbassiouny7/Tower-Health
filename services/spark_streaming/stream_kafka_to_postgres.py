@@ -16,22 +16,45 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "towerhealth")
 CHECKPOINT_DIR = os.getenv("SPARK_CHECKPOINT_DIR", "/tmp/towerhealth-checkpoints")
 
 
+def postgres_jdbc_options() -> dict[str, str]:
+    return {
+        "url": f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}",
+        "user": POSTGRES_USER,
+        "password": POSTGRES_PASSWORD,
+        "driver": "org.postgresql.Driver",
+    }
+
+
 def write_batch_to_postgres(batch_df, batch_id: int) -> None:
     """Persist one Spark micro-batch into Postgres through JDBC."""
     if batch_df.rdd.isEmpty():
         return
 
-    # foreachBatch gives us a normal DataFrame, so JDBC append writes are simple
-    # and Postgres can enforce uniqueness on topic/partition/offset.
-    jdbc_url = f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
-    (
-        batch_df.write
+    jdbc_options = postgres_jdbc_options()
+    existing_offsets = (
+        batch_df.sparkSession.read
         .format("jdbc")
-        .option("url", jdbc_url)
+        .options(**jdbc_options)
+        .option(
+            "dbtable",
+            "(SELECT topic, kafka_partition, kafka_offset FROM kafka_events) AS existing_offsets",
+        )
+        .load()
+    )
+    new_rows = batch_df.join(
+        existing_offsets,
+        on=["topic", "kafka_partition", "kafka_offset"],
+        how="left_anti",
+    )
+
+    if new_rows.rdd.isEmpty():
+        return
+
+    (
+        new_rows.write
+        .format("jdbc")
+        .options(**jdbc_options)
         .option("dbtable", "kafka_events")
-        .option("user", POSTGRES_USER)
-        .option("password", POSTGRES_PASSWORD)
-        .option("driver", "org.postgresql.Driver")
         .mode("append")
         .save()
     )

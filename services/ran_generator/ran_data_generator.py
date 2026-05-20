@@ -34,12 +34,12 @@ from __future__ import annotations
 import json
 import math
 import os
-import random
 import time
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+from faker import Faker
 
 # ──────────────────────────── configuration ───────────────────────────────────
 INTERVAL_SECONDS        = int(os.getenv("RAN_INTERVAL_SECONDS", "30"))
@@ -54,11 +54,14 @@ NUM_SITES               = 4
 
 # ──────────────────────────── primitive helpers ────────────────────────────────
 
-_rng = random.Random()          # module-level RNG; seed via RNG_SEED env if desired
+FAKER_LOCALE = "en_US"
+_fake = Faker(FAKER_LOCALE)
+_rng = _fake.random             # Faker-backed RNG; seed via RNG_SEED env if desired
 _seed = os.getenv("RNG_SEED")
 if _seed:
-    _rng.seed(int(_seed))
-
+    seed_value = int(_seed)
+    Faker.seed(seed_value)
+    _fake.seed_instance(seed_value)
 
 def flt(lo: float, hi: float, digits: int = 2) -> float:
     return round(_rng.uniform(lo, hi), digits)
@@ -543,6 +546,175 @@ def _build_environment(cs: ComponentState) -> Dict:
 
 # ──────────────────────────── snapshot builder ────────────────────────────────
 
+def _alert(
+    alerts: List[Dict[str, Any]],
+    site_id: str,
+    sequence_number: int,
+    severity: str,
+    category: str,
+    component_type: str,
+    component_id: str,
+    code: str,
+    message: str,
+    value: Any = None,
+) -> None:
+    alerts.append({
+        "alert_id": f"{site_id}-{sequence_number}-{code}-{component_id}",
+        "severity": severity,
+        "category": category,
+        "component_type": component_type,
+        "component_id": component_id,
+        "code": code,
+        "message": message,
+        "value": value,
+    })
+
+
+def _component_state_alerts(
+    alerts: List[Dict[str, Any]],
+    site_id: str,
+    sequence_number: int,
+    category: str,
+    component_type: str,
+    component_id_field: str,
+    components: List[Dict[str, Any]],
+) -> None:
+    for component in components:
+        component_id = str(component.get(component_id_field, "unknown"))
+        op_state = component.get("op_state")
+        status = component.get("status")
+
+        if op_state == "FAILED" or status == "DOWN":
+            _alert(
+                alerts, site_id, sequence_number,
+                "CRITICAL", category, component_type, component_id,
+                "COMPONENT_DOWN",
+                f"{component_type} {component_id} is down",
+                op_state,
+            )
+        elif op_state == "DEGRADED":
+            _alert(
+                alerts, site_id, sequence_number,
+                "WARNING", category, component_type, component_id,
+                "COMPONENT_DEGRADED",
+                f"{component_type} {component_id} is degraded",
+                op_state,
+            )
+        elif op_state == "RECOVERING":
+            _alert(
+                alerts, site_id, sequence_number,
+                "INFO", category, component_type, component_id,
+                "COMPONENT_RECOVERING",
+                f"{component_type} {component_id} is recovering",
+                op_state,
+            )
+
+
+def build_alerts(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Derive operational alerts from component state and KPI thresholds."""
+    site_id = snapshot["ran_metadata"]["site_id"]
+    seq = snapshot["sequence_number"]
+    alerts: List[Dict[str, Any]] = []
+
+    _component_state_alerts(alerts, site_id, seq, "radio", "radio_unit", "ru_id", snapshot["radio_units"])
+    _component_state_alerts(alerts, site_id, seq, "radio", "antenna", "antenna_id", snapshot["antennas"])
+    _component_state_alerts(alerts, site_id, seq, "radio", "cell", "cell_id", snapshot["cells"])
+    _component_state_alerts(alerts, site_id, seq, "core", "baseband_unit", "bbu_id", snapshot["baseband_units"])
+    _component_state_alerts(alerts, site_id, seq, "transport", "transport_link", "link_id", snapshot["transport_links"])
+    _component_state_alerts(alerts, site_id, seq, "power", "rectifier", "rectifier_id", snapshot["power_system"]["rectifiers"])
+    _component_state_alerts(alerts, site_id, seq, "power", "battery", "battery_id", snapshot["power_system"]["batteries"])
+
+    environment = snapshot["environment"]
+    if environment["status"] == "DOWN":
+        _alert(
+            alerts, site_id, seq, "WARNING", "environment", "environment", "ENV",
+            "ENVIRONMENT_SENSOR_DOWN", "Environment sensors are down", environment["op_state"],
+        )
+    if environment["door_status"] == "OPEN":
+        _alert(
+            alerts, site_id, seq, "WARNING", "security", "door", "SHELTER_DOOR",
+            "SHELTER_DOOR_OPEN", "Shelter door is open", environment["door_status"],
+        )
+    if environment["smoke_detected"]:
+        _alert(
+            alerts, site_id, seq, "CRITICAL", "environment", "smoke_sensor", "SMOKE",
+            "SMOKE_DETECTED", "Smoke detected in tower shelter", True,
+        )
+
+    power_system = snapshot["power_system"]
+    if power_system["status"] == "DOWN":
+        _alert(
+            alerts, site_id, seq, "CRITICAL", "power", "power_system", "POWER",
+            "SITE_POWER_DOWN", "Site power system is down", power_system["status"],
+        )
+    if power_system["generator"]["status"] == "ON":
+        _alert(
+            alerts, site_id, seq, "INFO", "power", "generator", "GENERATOR",
+            "GENERATOR_RUNNING", "Generator is running", power_system["generator"]["fuel_level_percent"],
+        )
+    if power_system["generator"]["fuel_level_percent"] < 20:
+        _alert(
+            alerts, site_id, seq, "WARNING", "power", "generator", "GENERATOR",
+            "LOW_GENERATOR_FUEL", "Generator fuel is below 20 percent",
+            power_system["generator"]["fuel_level_percent"],
+        )
+
+    for battery in power_system["batteries"]:
+        charge = battery.get("charge_percent")
+        if charge is not None and charge < 20:
+            _alert(
+                alerts, site_id, seq, "WARNING", "power", "battery", battery["battery_id"],
+                "LOW_BATTERY_CHARGE", "Battery charge is below 20 percent", charge,
+            )
+
+    for ru in snapshot["radio_units"]:
+        temp = ru.get("temperature_c")
+        if temp is not None and temp >= 60:
+            _alert(
+                alerts, site_id, seq, "WARNING", "radio", "radio_unit", ru["ru_id"],
+                "RU_HIGH_TEMPERATURE", "Radio unit temperature is high", temp,
+            )
+
+    for cell in snapshot["cells"]:
+        prb = cell.get("prb_utilization_percent")
+        sinr = cell.get("sinr_db")
+        handover_rate = cell.get("handover_success_rate_percent")
+        if prb is not None and prb >= 90:
+            _alert(
+                alerts, site_id, seq, "WARNING", "radio", "cell", cell["cell_id"],
+                "CELL_CONGESTION", "Cell PRB utilization is above 90 percent", prb,
+            )
+        if sinr is not None and sinr < 0:
+            _alert(
+                alerts, site_id, seq, "WARNING", "radio", "cell", cell["cell_id"],
+                "LOW_SINR", "Cell SINR is below 0 dB", sinr,
+            )
+        if handover_rate is not None and handover_rate < 90:
+            _alert(
+                alerts, site_id, seq, "WARNING", "mobility", "cell", cell["cell_id"],
+                "LOW_HANDOVER_SUCCESS", "Cell handover success rate is below 90 percent",
+                handover_rate,
+            )
+
+    severity_rank = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
+    return sorted(alerts, key=lambda a: (severity_rank[a["severity"]], a["category"], a["component_id"], a["code"]))
+
+
+def summarize_alerts(alerts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "total": len(alerts),
+        "critical": sum(1 for alert in alerts if alert["severity"] == "CRITICAL"),
+        "warning": sum(1 for alert in alerts if alert["severity"] == "WARNING"),
+        "info": sum(1 for alert in alerts if alert["severity"] == "INFO"),
+        "highest_severity": (
+            "CRITICAL" if any(alert["severity"] == "CRITICAL" for alert in alerts)
+            else "WARNING" if any(alert["severity"] == "WARNING" for alert in alerts)
+            else "INFO" if alerts
+            else "NONE"
+        ),
+    }
+
+
 def build_snapshot(site: SiteState) -> Dict:
     """Build one complete site snapshot from current state.
 
@@ -616,8 +788,23 @@ def build_snapshot(site: SiteState) -> Dict:
     else:
         site.bbu.fuel_level = clamp(site.bbu.fuel_level + _rng.uniform(0.0, 0.05), 0, 100)
 
-    return {
-        "message_id":      str(uuid.uuid4()),
+    transport_links = [
+        _build_link(m, site.links[m["link_id"]]) for m in _LINK_STATICS
+    ]
+    power_system = {
+        "status":     "UP" if power_up else "DOWN",
+        "rectifiers": rectifiers,
+        "batteries":  batteries,
+        "generator": {
+            "status":             "ON" if gen_on else "OFF",
+            "fuel_level_percent": round(site.bbu.fuel_level, 1),
+            "runtime_hours":      site.generator_runtime_hours,
+        },
+    }
+    environment = _build_environment(site.env)
+
+    snapshot = {
+        "message_id":      _fake.uuid4(),
         "timestamp":       ts_str,
         "sequence_number": site.seq,
         "ran_metadata": {
@@ -632,21 +819,13 @@ def build_snapshot(site: SiteState) -> Dict:
         "baseband_units":  [bbu_record],
         "antennas":        antennas,
         "cells":           cells,
-        "transport_links": [
-            _build_link(m, site.links[m["link_id"]]) for m in _LINK_STATICS
-        ],
-        "power_system": {
-            "status":     "UP" if power_up else "DOWN",
-            "rectifiers": rectifiers,
-            "batteries":  batteries,
-            "generator": {
-                "status":             "ON" if gen_on else "OFF",
-                "fuel_level_percent": round(site.bbu.fuel_level, 1),
-                "runtime_hours":      site.generator_runtime_hours,
-            },
-        },
-        "environment": _build_environment(site.env),
+        "transport_links": transport_links,
+        "power_system": power_system,
+        "environment": environment,
     }
+    snapshot["alerts"] = build_alerts(snapshot)
+    snapshot["alert_summary"] = summarize_alerts(snapshot["alerts"])
+    return snapshot
 
 
 # ──────────────────────────── output helpers ──────────────────────────────────
