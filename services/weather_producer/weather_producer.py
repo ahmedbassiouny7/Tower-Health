@@ -8,7 +8,8 @@ OUTPUT_MODE env var:
 Environment variables:
   WEATHERAPI_KEY              required
   OUTPUT_MODE                 default: stdout
-  WEATHER_LOCATION            default: Cairo
+  WEATHER_LOCATIONS           optional semicolon-separated label|lat,lon entries
+  WEATHER_LOCATION            default: Cairo when WEATHER_LOCATIONS is not set
   WEATHER_LAT / WEATHER_LON   optional; overrides WEATHER_LOCATION
   KAFKA_BOOTSTRAP_SERVERS     default: kafka-broker-1:9092
   KAFKA_TOPIC                 default: weather_events
@@ -40,6 +41,33 @@ DEFAULT_LOCATION            = "Cairo"
 DEFAULT_POLL_SECONDS        = 300
 KAFKA_CONNECT_RETRY_SECONDS = 5
 
+DEFAULT_TOWER_LOCATIONS: list[dict[str, str]] = [
+    {
+        "site_id": "SITE_001",
+        "site_name": "AL_TOWER_01",
+        "region": "Alexandria",
+        "query": "31.2001,29.9187",
+    },
+    {
+        "site_id": "SITE_002",
+        "site_name": "CA_TOWER_02",
+        "region": "Cairo",
+        "query": "30.0444,31.2357",
+    },
+    {
+        "site_id": "SITE_003",
+        "site_name": "GZ_TOWER_03",
+        "region": "Giza",
+        "query": "30.0131,31.2089",
+    },
+    {
+        "site_id": "SITE_004",
+        "site_name": "KS_TOWER_04",
+        "region": "North Sinai",
+        "query": "31.1107,33.7961",
+    },
+]
+
 running = True
 
 
@@ -58,21 +86,50 @@ def env_int(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer") from exc
 
 
-def get_weather_location() -> str:
+def get_weather_location() -> dict[str, str]:
     """Prefer exact coordinates, then fall back to a named WeatherAPI location."""
     lat = os.getenv("WEATHER_LAT")
     lon = os.getenv("WEATHER_LON")
     if lat and lon:
-        return f"{lat},{lon}"
-    return os.getenv("WEATHER_LOCATION", DEFAULT_LOCATION)
+        query = f"{lat},{lon}"
+        return {"region": os.getenv("WEATHER_LOCATION", query), "query": query}
+
+    location = os.getenv("WEATHER_LOCATION", DEFAULT_LOCATION)
+    return {"region": location, "query": location}
 
 
-def build_weather_event(location_query: str, mapped_weather: dict[str, Any]) -> dict[str, Any]:
+def get_weather_locations() -> list[dict[str, str]]:
+    """Return all WeatherAPI locations to poll this cycle."""
+    configured_locations = os.getenv("WEATHER_LOCATIONS")
+    if not configured_locations:
+        if os.getenv("WEATHER_LOCATION") or os.getenv("WEATHER_LAT") or os.getenv("WEATHER_LON"):
+            return [get_weather_location()]
+        return DEFAULT_TOWER_LOCATIONS
+
+    locations: list[dict[str, str]] = []
+    for raw_location in configured_locations.split(";"):
+        raw_location = raw_location.strip()
+        if not raw_location:
+            continue
+
+        label, sep, query = raw_location.partition("|")
+        if sep:
+            locations.append({"region": label.strip(), "query": query.strip()})
+        else:
+            locations.append({"region": raw_location, "query": raw_location})
+
+    return locations or DEFAULT_TOWER_LOCATIONS
+
+
+def build_weather_event(location: dict[str, str], mapped_weather: dict[str, Any]) -> dict[str, Any]:
     """Wrap mapped WeatherAPI fields with metadata useful for Kafka consumers."""
     event: dict[str, Any] = {
         "event_timestamp": datetime.now(timezone.utc).isoformat(),
         "source_system":   "weather_producer",
-        "location_query":  location_query,
+        "location_query":  location["query"],
+        "ran_site_id":     location.get("site_id"),
+        "ran_site_name":   location.get("site_name"),
+        "ran_region":      location.get("region"),
     }
     event.update(project_weather_fields(mapped_weather))
     event.update({
@@ -122,7 +179,7 @@ def create_kafka_producer(bootstrap_servers: str):
 
 def emit_kafka(producer, topic: str, event: dict[str, Any]) -> None:
     """Publish one weather event using location as the Kafka message key."""
-    key = str(event.get("weather_location_name") or event.get("location_query", "unknown"))
+    key = str(event.get("ran_site_id") or event.get("weather_location_name") or event.get("location_query", "unknown"))
     metadata = producer.send(topic, key=key, value=event).get(timeout=30)
     producer.flush()
     print(
@@ -140,7 +197,7 @@ def main() -> int:
         print("Missing WEATHERAPI_KEY", file=sys.stderr)
         return 2
 
-    location_query = get_weather_location()
+    locations      = get_weather_locations()
     poll_seconds   = env_int("WEATHER_POLL_SECONDS", DEFAULT_POLL_SECONDS)
 
     signal.signal(signal.SIGINT, stop)
@@ -157,24 +214,26 @@ def main() -> int:
 
     print(
         f"Weather producer started  mode={OUTPUT_MODE}  "
-        f"location={location_query}  poll={poll_seconds}s",
+        f"locations={len(locations)}  poll={poll_seconds}s",
         flush=True,
     )
 
     try:
         while running:
-            try:
-                raw_weather    = fetch_current_weather(api_key, location_query)
-                mapped_weather = map_to_tower_weather_fields(raw_weather)
-                event          = build_weather_event(location_query, mapped_weather)
+            for location in locations:
+                try:
+                    raw_weather    = fetch_current_weather(api_key, location["query"])
+                    mapped_weather = map_to_tower_weather_fields(raw_weather)
+                    event          = build_weather_event(location, mapped_weather)
 
-                if OUTPUT_MODE == "kafka" and producer:
-                    emit_kafka(producer, topic, event)
-                else:
-                    emit_stdout(event)
+                    if OUTPUT_MODE == "kafka" and producer:
+                        emit_kafka(producer, topic, event)
+                    else:
+                        emit_stdout(event)
 
-            except WeatherApiError as exc:
-                print(f"Weather fetch failed: {exc}", file=sys.stderr, flush=True)
+                except WeatherApiError as exc:
+                    region = location.get("region", location["query"])
+                    print(f"Weather fetch failed for {region}: {exc}", file=sys.stderr, flush=True)
 
             for _ in range(poll_seconds):
                 if not running:
