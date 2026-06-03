@@ -715,7 +715,7 @@ def summarize_alerts(alerts: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def build_snapshot(site: SiteState) -> Dict:
+def build_snapshot(site: SiteState, ts: datetime = None) -> Dict:
     """Build one complete site snapshot from current state.
 
     The build order is critical:
@@ -727,7 +727,8 @@ def build_snapshot(site: SiteState) -> Dict:
     """
     site.advance()
 
-    ts  = datetime.now(timezone.utc)
+    if ts is None:
+        ts = datetime.now(timezone.utc)
     ts_str = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
     tmult  = traffic_multiplier(ts)
 
@@ -906,9 +907,10 @@ def main() -> None:
 
     while True:
         cycle_start = time.monotonic()
+        cycle_ts = datetime.now(timezone.utc)
 
         for site in sites:
-            snapshot = build_snapshot(site)
+            snapshot = build_snapshot(site, cycle_ts)
 
             if OUTPUT_MODE in ("stdout", "both"):
                 to_stdout(snapshot)

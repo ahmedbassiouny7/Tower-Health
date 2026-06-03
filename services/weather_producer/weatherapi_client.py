@@ -87,10 +87,9 @@ def fetch_current_weather(
 
 def map_to_tower_weather_fields(data: dict[str, Any]) -> dict[str, Any]:
     """Map WeatherAPI current response to the Tower Health weather schema."""
-    # The API response is nested. This flattens only the fields the rest of the
-    # TowerHealth pipeline needs.
+    # The API response is nested. This flattens only the selected current
+    # weather fields the TowerHealth pipeline needs.
     current = data.get("current") or {}
-    location = data.get("location") or {}
     condition = current.get("condition") or {}
 
     return {
@@ -101,22 +100,18 @@ def map_to_tower_weather_fields(data: dict[str, Any]) -> dict[str, Any]:
         "weather_condition": condition.get("text"),
         "weather_observed_at": current.get("last_updated"),
         "weather_fetched_at": datetime.now(timezone.utc).isoformat(),
-        "weather_location_name": location.get("name"),
-        "weather_region": location.get("region"),
-        "weather_country": location.get("country"),
-        "weather_latitude": location.get("lat"),
-        "weather_longitude": location.get("lon"),
     }
 
 
 def project_weather_fields(weather: dict[str, Any]) -> dict[str, Any]:
-    """Keep only the five weather fields defined in the TowerHealth source schema."""
+    """Keep only the six selected WeatherAPI current weather fields."""
     return {
         "weather_temperature_c": weather.get("weather_temperature_c"),
         "weather_humidity_pct": weather.get("weather_humidity_pct"),
         "weather_rainfall_mm": weather.get("weather_rainfall_mm"),
         "weather_wind_speed_kmh": weather.get("weather_wind_speed_kmh"),
         "weather_condition": weather.get("weather_condition"),
+        "weather_observed_at": weather.get("weather_observed_at"),
     }
 
 
@@ -198,7 +193,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--project-fields-only",
         action="store_true",
-        help="Output only the five TowerHealth weather source fields.",
+        help="Output only the six selected TowerHealth weather source fields.",
     )
     parser.add_argument(
         "--raw",

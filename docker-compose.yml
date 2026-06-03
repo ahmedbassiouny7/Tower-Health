@@ -98,6 +98,9 @@ services:
       S3_PREFIX: ${S3_PREFIX:-topics}
       S3_FLUSH_SIZE: ${S3_FLUSH_SIZE:-1000}
       S3_ROTATE_INTERVAL_MS: ${S3_ROTATE_INTERVAL_MS:-900000}
+      S3_ROTATE_SCHEDULE_INTERVAL_MS: ${S3_ROTATE_SCHEDULE_INTERVAL_MS:-900000}
+      S3_PARTITION_DURATION_MS: ${S3_PARTITION_DURATION_MS:-900000}
+      S3_TIMESTAMP_EXTRACTOR: ${S3_TIMESTAMP_EXTRACTOR:-Wallclock}
     command:
       - sh
       - -c
@@ -119,12 +122,13 @@ services:
             \"topics.dir\": \"$${S3_PREFIX}\",
             \"flush.size\": \"$${S3_FLUSH_SIZE}\",
             \"rotate.interval.ms\": \"$${S3_ROTATE_INTERVAL_MS}\",
+            \"rotate.schedule.interval.ms\": \"$${S3_ROTATE_SCHEDULE_INTERVAL_MS}\",
             \"storage.class\": \"io.confluent.connect.s3.storage.S3Storage\",
             \"format.class\": \"io.confluent.connect.s3.format.json.JsonFormat\",
             \"partitioner.class\": \"io.confluent.connect.storage.partitioner.TimeBasedPartitioner\",
             \"path.format\": \"'year'=YYYY/'month'=MM/'day'=dd/'hour'=HH\",
-            \"partition.duration.ms\": \"900000\",
-            \"timestamp.extractor\": \"Wallclock\",
+            \"partition.duration.ms\": \"$${S3_PARTITION_DURATION_MS}\",
+            \"timestamp.extractor\": \"$${S3_TIMESTAMP_EXTRACTOR}\",
             \"locale\": \"en-US\",
             \"timezone\": \"UTC\",
             \"schema.compatibility\": \"NONE\"

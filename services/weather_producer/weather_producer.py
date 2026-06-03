@@ -71,6 +71,22 @@ DEFAULT_TOWER_LOCATIONS: list[dict[str, str]] = [
 running = True
 
 
+def with_default_site_metadata(location: dict[str, str]) -> dict[str, str]:
+    """Attach default site metadata when a configured location matches a tower."""
+    region = location.get("region", "").casefold()
+    query = location.get("query", "").replace(" ", "")
+
+    for tower in DEFAULT_TOWER_LOCATIONS:
+        tower_region = tower["region"].casefold()
+        tower_query = tower["query"].replace(" ", "")
+        if region == tower_region or query == tower_query:
+            enriched = dict(tower)
+            enriched.update(location)
+            return enriched
+
+    return location
+
+
 def stop(_signum: int, _frame: Any) -> None:
     global running
     running = False
@@ -114,15 +130,25 @@ def get_weather_locations() -> list[dict[str, str]]:
 
         label, sep, query = raw_location.partition("|")
         if sep:
-            locations.append({"region": label.strip(), "query": query.strip()})
+            locations.append(
+                with_default_site_metadata({
+                    "region": label.strip(),
+                    "query": query.strip(),
+                })
+            )
         else:
-            locations.append({"region": raw_location, "query": raw_location})
+            locations.append(
+                with_default_site_metadata({
+                    "region": raw_location,
+                    "query": raw_location,
+                })
+            )
 
     return locations or DEFAULT_TOWER_LOCATIONS
 
 
 def build_weather_event(location: dict[str, str], mapped_weather: dict[str, Any]) -> dict[str, Any]:
-    """Wrap mapped WeatherAPI fields with metadata useful for Kafka consumers."""
+    """Wrap selected WeatherAPI fields with metadata useful for Kafka consumers."""
     event: dict[str, Any] = {
         "event_timestamp": datetime.now(timezone.utc).isoformat(),
         "source_system":   "weather_producer",
@@ -133,13 +159,7 @@ def build_weather_event(location: dict[str, str], mapped_weather: dict[str, Any]
     }
     event.update(project_weather_fields(mapped_weather))
     event.update({
-        "weather_observed_at":    mapped_weather.get("weather_observed_at"),
-        "weather_fetched_at":     mapped_weather.get("weather_fetched_at"),
-        "weather_location_name":  mapped_weather.get("weather_location_name"),
-        "weather_region":         mapped_weather.get("weather_region"),
-        "weather_country":        mapped_weather.get("weather_country"),
-        "weather_latitude":       mapped_weather.get("weather_latitude"),
-        "weather_longitude":      mapped_weather.get("weather_longitude"),
+        "weather_fetched_at": mapped_weather.get("weather_fetched_at"),
     })
     return event
 
@@ -179,7 +199,7 @@ def create_kafka_producer(bootstrap_servers: str):
 
 def emit_kafka(producer, topic: str, event: dict[str, Any]) -> None:
     """Publish one weather event using location as the Kafka message key."""
-    key = str(event.get("ran_site_id") or event.get("weather_location_name") or event.get("location_query", "unknown"))
+    key = str(event.get("ran_site_id") or event.get("location_query", "unknown"))
     metadata = producer.send(topic, key=key, value=event).get(timeout=30)
     producer.flush()
     print(
