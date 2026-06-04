@@ -214,17 +214,17 @@ services:
       - spark-worker
     environment:
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker:29092}
-      KAFKA_TOPICS: ${SPARK_KAFKA_TOPICS:-ran_telemetry,weather_events}
+      KAFKA_TOPICS: ${SPARK_KAFKA_TOPICS:-ran_telemetry}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-towerhealth}
       POSTGRES_USER: ${POSTGRES_USER:-towerhealth}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-towerhealth}
-      SPARK_CHECKPOINT_DIR: /tmp/towerhealth-checkpoints
+      SPARK_CHECKPOINT_DIR: /tmp/towerhealth-checkpoints-ran
       HOME: /tmp
     volumes:
       - ./services/spark_streaming:/opt/towerhealth/spark_streaming:ro
-      - spark_checkpoints:/tmp/towerhealth-checkpoints
+      - spark_ran_checkpoints:/tmp/towerhealth-checkpoints-ran
       - spark_ivy:/tmp/.ivy2
     command:
       - /bin/sh
@@ -262,7 +262,7 @@ services:
       HOME: /tmp
     volumes:
       - ./services/spark_streaming:/opt/towerhealth/spark_streaming:ro
-      - spark_checkpoints:/tmp/towerhealth-checkpoints-weather
+      - spark_weather_checkpoints:/tmp/towerhealth-checkpoints-weather
       - spark_ivy:/tmp/.ivy2
     command:
       - /bin/sh
@@ -339,7 +339,7 @@ services:
       WEATHER_LON: ${WEATHER_LON:-}
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker:29092}
       KAFKA_TOPIC: ${WEATHER_KAFKA_TOPIC:-weather_events}
-      WEATHER_POLL_SECONDS: ${WEATHER_POLL_SECONDS:-900}
+      WEATHER_POLL_SECONDS: ${WEATHER_POLL_SECONDS:-300}
     networks:
       - towerhealth
     restart: unless-stopped
@@ -347,7 +347,8 @@ services:
 volumes:
   pg_data:
   ran_data:
-  spark_checkpoints:
+  spark_ran_checkpoints:
+  spark_weather_checkpoints:
   spark_ivy:
 
 networks:

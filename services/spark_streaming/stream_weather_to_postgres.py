@@ -5,7 +5,12 @@ from pyspark.sql.types import StructType, StructField, StringType, DoubleType, I
 
 # 1. الإعدادات
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "broker:29092")
-POSTGRES_DB = "towerhealth"
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
+POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "towerhealth")
+POSTGRES_USER = os.getenv("POSTGRES_USER", "towerhealth")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "towerhealth")
+CHECKPOINT_DIR = os.getenv("SPARK_CHECKPOINT_DIR", "/tmp/towerhealth-checkpoints-weather")
 
 # 2. الـ Schema (بما فيها الـ precip_mm للمطر)
 # عدلي الـ Schema عشان تطابق الـ Fields اللي طالعة من الكود
@@ -34,9 +39,9 @@ weather_schema = StructType([
 def write_weather_batch(batch_df, batch_id):
     if batch_df.rdd.isEmpty(): return
     batch_df.write.format("jdbc") \
-        .option("url", f"jdbc:postgresql://postgres:5432/{POSTGRES_DB}") \
-        .option("user", "towerhealth") \
-        .option("password", "towerhealth") \
+        .option("url", f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}") \
+        .option("user", POSTGRES_USER) \
+        .option("password", POSTGRES_PASSWORD) \
         .option("driver", "org.postgresql.Driver") \
         .option("dbtable", "weather_metrics") \
         .mode("append").save()
@@ -57,7 +62,8 @@ def main():
     weather_raw = spark.readStream.format("kafka") \
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
         .option("subscribe", "weather_events") \
-        .option("startingOffsets", "earliest").load()
+        .option("startingOffsets", "earliest") \
+        .option("failOnDataLoss", "false").load()
 
     # 4. فك الـ JSON والـ Transformations
     weather_parsed = weather_raw.select(
@@ -78,7 +84,7 @@ def main():
     # 5. الـ Sink مع التريجر الهادي (30 ثانية)
     query = weather_final.writeStream \
         .foreachBatch(write_weather_batch) \
-        .option("checkpointLocation", "/tmp/spark_checkpoints/weather_final_v1") \
+        .option("checkpointLocation", CHECKPOINT_DIR) \
         .trigger(processingTime='30 seconds') \
         .start()
 

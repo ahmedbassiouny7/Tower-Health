@@ -13,7 +13,7 @@ Environment variables:
   WEATHER_LAT / WEATHER_LON   optional; overrides WEATHER_LOCATION
   KAFKA_BOOTSTRAP_SERVERS     default: kafka-broker-1:9092
   KAFKA_TOPIC                 default: weather_events
-  WEATHER_POLL_SECONDS        default: 900
+  WEATHER_POLL_SECONDS        default: 300
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ OUTPUT_MODE                 = os.getenv("OUTPUT_MODE", "stdout")
 DEFAULT_KAFKA_BOOTSTRAP     = "kafka-broker-1:9092"
 DEFAULT_KAFKA_TOPIC         = "weather_events"
 DEFAULT_LOCATION            = "Cairo"
-DEFAULT_POLL_SECONDS        = 900
+DEFAULT_POLL_SECONDS        = 300
 KAFKA_CONNECT_RETRY_SECONDS = 5
 
 DEFAULT_TOWER_LOCATIONS: list[dict[str, str]] = [

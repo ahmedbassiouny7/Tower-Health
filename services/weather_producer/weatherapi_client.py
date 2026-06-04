@@ -91,6 +91,7 @@ def map_to_tower_weather_fields(data: dict[str, Any]) -> dict[str, Any]:
     # weather fields the TowerHealth pipeline needs.
     current = data.get("current") or {}
     condition = current.get("condition") or {}
+    location = data.get("location") or {}
 
     return {
         "weather_temperature_c": current.get("temp_c"),
@@ -100,11 +101,16 @@ def map_to_tower_weather_fields(data: dict[str, Any]) -> dict[str, Any]:
         "weather_condition": condition.get("text"),
         "weather_observed_at": current.get("last_updated"),
         "weather_fetched_at": datetime.now(timezone.utc).isoformat(),
+        "weather_location_name": location.get("name"),
+        "weather_region": location.get("region"),
+        "weather_country": location.get("country"),
+        "weather_latitude": location.get("lat"),
+        "weather_longitude": location.get("lon"),
     }
 
 
 def project_weather_fields(weather: dict[str, Any]) -> dict[str, Any]:
-    """Keep only the six selected WeatherAPI current weather fields."""
+    """Keep the selected WeatherAPI current weather and location fields."""
     return {
         "weather_temperature_c": weather.get("weather_temperature_c"),
         "weather_humidity_pct": weather.get("weather_humidity_pct"),
@@ -112,6 +118,11 @@ def project_weather_fields(weather: dict[str, Any]) -> dict[str, Any]:
         "weather_wind_speed_kmh": weather.get("weather_wind_speed_kmh"),
         "weather_condition": weather.get("weather_condition"),
         "weather_observed_at": weather.get("weather_observed_at"),
+        "weather_location_name": weather.get("weather_location_name"),
+        "weather_region": weather.get("weather_region"),
+        "weather_country": weather.get("weather_country"),
+        "weather_latitude": weather.get("weather_latitude"),
+        "weather_longitude": weather.get("weather_longitude"),
     }
 
 
