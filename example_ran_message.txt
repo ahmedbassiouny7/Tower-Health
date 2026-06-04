@@ -1,0 +1,315 @@
+﻿{
+  "message_id": "cb0c81fb-5365-45b2-9321-168c378fc71e",
+  "timestamp": "2026-05-20T12:45:18Z",
+  "sequence_number": 1,
+  "ran_metadata": {
+    "site_id": "SITE_001",
+    "site_name": "AL_TOWER_01",
+    "location": {
+      "latitude": 31.2001,
+      "longitude": 29.9187
+    },
+    "region": "Alexandria",
+    "vendor": "Ericsson",
+    "technology": [
+      "4G",
+      "5G"
+    ]
+  },
+  "radio_units": [
+    {
+      "ru_id": "RU_1",
+      "sector_id": "S1",
+      "status": "UP",
+      "op_state": "HEALTHY",
+      "temperature_c": 35.5,
+      "tx_power_watts": 173.53,
+      "rx_signal_strength_dbm": -57.88,
+      "vswr": 1.15,
+      "current_ampere": 26.99,
+      "voltage_volt": 49.21,
+      "packet_error_rate": 0.01,
+      "throughput_mbps": 150.0
+    },
+    {
+      "ru_id": "RU_2",
+      "sector_id": "S2",
+      "status": "UP",
+      "op_state": "HEALTHY",
+      "temperature_c": 33.0,
+      "tx_power_watts": 184.62,
+      "rx_signal_strength_dbm": -54.96,
+      "vswr": 1.05,
+      "current_ampere": 28.05,
+      "voltage_volt": 49.91,
+      "packet_error_rate": 0.01,
+      "throughput_mbps": 150.0
+    },
+    {
+      "ru_id": "RU_3",
+      "sector_id": "S3",
+      "status": "UP",
+      "op_state": "HEALTHY",
+      "temperature_c": 35.4,
+      "tx_power_watts": 175.76,
+      "rx_signal_strength_dbm": -54.65,
+      "vswr": 1.07,
+      "current_ampere": 26.8,
+      "voltage_volt": 49.7,
+      "packet_error_rate": 0.01,
+      "throughput_mbps": 150.0
+    }
+  ],
+  "baseband_units": [
+    {
+      "bbu_id": "BBU_MAIN",
+      "status": "UP",
+      "op_state": "HEALTHY",
+      "cpu_utilization_percent": 15.01,
+      "memory_utilization_percent": 20.08,
+      "disk_usage_percent": 22.89,
+      "process_latency_ms": 7.41,
+      "active_users": 240,
+      "control_plane_latency_ms": 5.82,
+      "user_plane_latency_ms": 8.83
+    }
+  ],
+  "antennas": [
+    {
+      "antenna_id": "ANT_1",
+      "sector_id": "S1",
+      "tilt_degree": 3.0,
+      "azimuth_degree": 0,
+      "mimo_layers": 4,
+      "status": "UP",
+      "op_state": "HEALTHY",
+      "rssi_dbm": -56.99,
+      "snr_db": 30.71
+    },
+    {
+      "antenna_id": "ANT_2",
+      "sector_id": "S2",
+      "tilt_degree": 4.0,
+      "azimuth_degree": 120,
+      "mimo_layers": 8,
+      "status": "UP",
+      "op_state": "HEALTHY",
+      "rssi_dbm": -57.88,
+      "snr_db": 30.12
+    },
+    {
+      "antenna_id": "ANT_3",
+      "sector_id": "S3",
+      "tilt_degree": 5.0,
+      "azimuth_degree": 240,
+      "mimo_layers": 4,
+      "status": "UP",
+      "op_state": "HEALTHY",
+      "rssi_dbm": -54.6,
+      "snr_db": 33.16
+    }
+  ],
+  "cells": [
+    {
+      "cell_id": "CELL_1",
+      "sector_id": "S1",
+      "technology": "4G",
+      "carrier_frequency_mhz": 1800,
+      "bandwidth_mhz": 20,
+      "status": "UP",
+      "op_state": "HEALTHY",
+      "active_users": 80,
+      "connected_users": 96,
+      "prb_utilization_percent": 20.0,
+      "throughput_downlink_mbps": 130.0,
+      "throughput_uplink_mbps": 115.92,
+      "spectral_efficiency_bps_per_hz": 5.88,
+      "rsrp_dbm": -83.76,
+      "rsrq_db": -7.37,
+      "sinr_db": 16.87,
+      "cqi_avg": 11.4,
+      "bler_downlink_percent": 2.13,
+      "bler_uplink_percent": 1.82,
+      "harq_retransmission_rate_percent": 4.6,
+      "latency_downlink_ms": 16.0,
+      "latency_uplink_ms": 16.29,
+      "handover_attempts": 159,
+      "handover_success_rate_percent": 96.34,
+      "handover_failures": 5,
+      "rrc_connection_attempts": 2793,
+      "rrc_success_rate_percent": 96.07,
+      "erab_setup_success_rate_percent": 95.41,
+      "call_drop_rate_percent": 1.46,
+      "abnormal_release_rate_percent": 1.1
+    },
+    {
+      "cell_id": "CELL_2",
+      "sector_id": "S2",
+      "technology": "5G",
+      "carrier_frequency_mhz": 3500,
+      "bandwidth_mhz": 100,
+      "status": "UP",
+      "op_state": "HEALTHY",
+      "active_users": 80,
+      "connected_users": 90,
+      "prb_utilization_percent": 20.0,
+      "throughput_downlink_mbps": 160.0,
+      "throughput_uplink_mbps": 117.96,
+      "spectral_efficiency_bps_per_hz": 5.77,
+      "rsrp_dbm": -83.39,
+      "rsrq_db": -7.4,
+      "sinr_db": 18.36,
+      "cqi_avg": 11.2,
+      "bler_downlink_percent": 2.18,
+      "bler_uplink_percent": 1.68,
+      "harq_retransmission_rate_percent": 5.15,
+      "latency_downlink_ms": 12.0,
+      "latency_uplink_ms": 8.76,
+      "handover_attempts": 97,
+      "handover_success_rate_percent": 96.3,
+      "handover_failures": 3,
+      "rrc_connection_attempts": 255,
+      "rrc_success_rate_percent": 95.52,
+      "erab_setup_success_rate_percent": 95.36,
+      "call_drop_rate_percent": 1.25,
+      "abnormal_release_rate_percent": 1.17
+    },
+    {
+      "cell_id": "CELL_3",
+      "sector_id": "S3",
+      "technology": "5G",
+      "carrier_frequency_mhz": 2600,
+      "bandwidth_mhz": 60,
+      "status": "UP",
+      "op_state": "HEALTHY",
+      "active_users": 80,
+      "connected_users": 100,
+      "prb_utilization_percent": 20.0,
+      "throughput_downlink_mbps": 160.0,
+      "throughput_uplink_mbps": 124.21,
+      "spectral_efficiency_bps_per_hz": 6.3,
+      "rsrp_dbm": -79.85,
+      "rsrq_db": -6.58,
+      "sinr_db": 18.63,
+      "cqi_avg": 12.1,
+      "bler_downlink_percent": 1.9,
+      "bler_uplink_percent": 1.45,
+      "harq_retransmission_rate_percent": 4.03,
+      "latency_downlink_ms": 12.0,
+      "latency_uplink_ms": 7.04,
+      "handover_attempts": 77,
+      "handover_success_rate_percent": 96.57,
+      "handover_failures": 2,
+      "rrc_connection_attempts": 2481,
+      "rrc_success_rate_percent": 96.12,
+      "erab_setup_success_rate_percent": 96.58,
+      "call_drop_rate_percent": 0.91,
+      "abnormal_release_rate_percent": 0.87
+    }
+  ],
+  "transport_links": [
+    {
+      "link_id": "BH_1",
+      "type": "FIBER",
+      "status": "UP",
+      "op_state": "HEALTHY",
+      "latency_ms": 1,
+      "jitter_ms": 0.03,
+      "packet_loss_percent": 0.0,
+      "throughput_mbps": 6680.24,
+      "utilization_percent": 5.61
+    },
+    {
+      "link_id": "BH_2",
+      "type": "MICROWAVE",
+      "status": "UP",
+      "op_state": "HEALTHY",
+      "latency_ms": 3.07,
+      "jitter_ms": 1.02,
+      "packet_loss_percent": 0.02,
+      "throughput_mbps": 7873.65,
+      "utilization_percent": 20.67
+    }
+  ],
+  "power_system": {
+    "status": "UP",
+    "rectifiers": [
+      {
+        "rectifier_id": "REC_1",
+        "status": "UP",
+        "op_state": "HEALTHY",
+        "output_voltage_volt": 49.5,
+        "current_ampere": 43.86
+      },
+      {
+        "rectifier_id": "REC_2",
+        "status": "UP",
+        "op_state": "HEALTHY",
+        "output_voltage_volt": 49.51,
+        "current_ampere": 43.69
+      }
+    ],
+    "batteries": [
+      {
+        "battery_id": "BAT_1",
+        "status": "DOWN",
+        "op_state": "FAILED",
+        "charge_percent": null,
+        "temperature_c": null
+      },
+      {
+        "battery_id": "BAT_2",
+        "status": "UP",
+        "op_state": "HEALTHY",
+        "charge_percent": 90.5,
+        "temperature_c": 19.69
+      }
+    ],
+    "generator": {
+      "status": "OFF",
+      "fuel_level_percent": 80.0,
+      "runtime_hours": 0.0
+    }
+  },
+  "environment": {
+    "status": "UP",
+    "op_state": "HEALTHY",
+    "temperature_sensors": [
+      {
+        "sensor_id": "TEMP_1",
+        "value_c": 34.5
+      },
+      {
+        "sensor_id": "TEMP_2",
+        "value_c": 32.9
+      }
+    ],
+    "humidity_sensors": [
+      {
+        "sensor_id": "HUM_1",
+        "value_percent": 56.1
+      }
+    ],
+    "door_status": "CLOSED",
+    "smoke_detected": false
+  },
+  "alerts": [
+    {
+      "alert_id": "SITE_001-1-COMPONENT_DOWN-BAT_1",
+      "severity": "CRITICAL",
+      "category": "power",
+      "component_type": "battery",
+      "component_id": "BAT_1",
+      "code": "COMPONENT_DOWN",
+      "message": "battery BAT_1 is down",
+      "value": "FAILED"
+    }
+  ],
+  "alert_summary": {
+    "total": 1,
+    "critical": 1,
+    "warning": 0,
+    "info": 0,
+    "highest_severity": "CRITICAL"
+  }
+}
