@@ -101,13 +101,11 @@ flowchart LR
     sparkWeather["Spark Weather Stream<br/>stream_weather_to_postgres.py"]
     postgres["Postgres<br/>kafka_events table"]
     dashboard["Local Streamlit Dashboard<br/>services/streamlit_dashboard"]
-    s3["Optional S3 Sink<br/>raw-data/ topic archive"]
 
     ran --> kafka
     weather --> kafka
     kafka --> sparkRan
     kafka --> sparkWeather
-    kafka -. optional .-> s3
     sparkRan --> postgres
     sparkWeather --> postgres
     postgres --> dashboard
