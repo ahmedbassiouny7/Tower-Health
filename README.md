@@ -1,131 +1,257 @@
-﻿# TowerHealth
+# Tower Health
 
-TowerHealth is a local streaming data project for telecom tower monitoring. It generates synthetic RAN telemetry, fetches weather data, streams both through Kafka, stores realtime events in Postgres using Spark Structured Streaming, and can archive raw Kafka data to S3 using Kafka Connect.
+Tower Health is an end-to-end telecom data engineering project for monitoring RAN tower health, alarms, radio KPIs, and predicted failure risk.
+
+The repository includes the local streaming prototype, EC2 PySpark batch jobs, Airflow orchestration, Snowflake external-table setup, Cortex Analyst semantic model, LightGBM inference, and Streamlit NOC chat apps.
 
 ## Architecture
 
 ```text
-RAN generator        Weather producer
-      |                    |
-      +------> Kafka <-----+
-                 |
-        +--------+--------+
-        |                 |
- Kafka Connect S3     Spark Streaming
-        |                 |
-        v                 v
-       S3              Postgres
-                          |
-                          v
-                    Streamlit dashboard
+Synthetic RAN generator
+        |
+        v
+Kafka / S3 raw landing
+s3a://tower-iti-project/raw-data/ran_telemetry/
+        |
+        v
+PySpark Silver
+s3a://tower-iti-project/silver/ran_telemetry_normalized/
+        |
+        v
+PySpark Gold
+s3a://tower-iti-project/gold/ran_telemetry_bi/
+        |
+        +--> ML prep
+        |    s3a://tower-iti-project/gold/ran_ml_input/
+        |
+        +--> LightGBM prediction
+             s3://tower-iti-project/gold/ran_ml_predictions/
+        |
+        v
+Snowflake external tables + Cortex Analyst semantic model
+        |
+        +--> Power BI dashboard
+        +--> EC2 Streamlit NOC chat app
+        +--> Snowflake Streamlit app package
 ```
 
-## Main Services
+## Repository Structure
 
-- `broker`: single-node Kafka broker for local development.
-- `ran-generator`: creates synthetic RAN telemetry messages on `ran_telemetry`.
-- `weather-producer`: fetches WeatherAPI data and publishes to `weather_events`.
-- `connect`: Kafka Connect worker with the Confluent S3 sink plugin.
-- `s3-connector-init`: creates or updates the S3 sink connector.
-- `spark-master` / `spark-worker`: local Spark cluster.
-- `spark-stream`: reads Kafka topics and writes events to Postgres.
-- `postgres`: stores streamed Kafka events in `kafka_events`.
-- `streamlit`: dashboard for message counts and latest events.
-- `kafka-ui`: browser UI for Kafka topics and connector state.
+| Path | Purpose |
+|---|---|
+| `services/` | Local Docker streaming prototype: RAN generator, weather producer, Spark streaming, Postgres, Streamlit dashboard |
+| `airflow/dags/` | Production-style Airflow DAG for EC2 batch orchestration |
+| `ml/` | EC2 Silver/Gold PySpark jobs, ML prep, S3 inference wrapper, model artifact, feature metadata |
+| `cell_level_prediction/` | Training, prediction, notebooks, and local ML experiments |
+| `snowflake/` | External table setup SQL, Cortex semantic model YAML, semantic model upload helper |
+| `streamlit/` | EC2 Streamlit app using Snowflake JWT key-pair authentication |
+| `streamlit_snowflake/` | Snowflake Streamlit app export (`TOWER_HEALTH_NOC`) |
+| `docs/` | Enhanced project documentation and technical inventory |
 
-## Topics
+## Local Streaming Stack
 
-```text
-ran_telemetry
-weather_events
-```
-
-## Setup
-
-Copy the example environment file and fill in secrets:
+Copy the example environment file and fill in local secrets:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Required for weather:
-
-```env
-WEATHERAPI_KEY=your_weatherapi_key
-```
-
-Required only if you want S3 writes:
-
-```env
-AWS_ACCESS_KEY_ID=your_key
-AWS_SECRET_ACCESS_KEY=your_secret
-AWS_SESSION_TOKEN=optional_for_temporary_credentials
-AWS_REGION=us-east-1
-S3_BUCKET_NAME=your_bucket
-```
-
-## Run
-
-Start the full stack:
+Start the local Kafka/Postgres/Spark/Streamlit stack:
 
 ```powershell
 docker compose up -d
 ```
 
-Check container status:
+Useful local URLs:
 
-```powershell
-docker compose ps
-```
+| Service | URL |
+|---|---|
+| Kafka UI | `http://localhost:8090` |
+| Spark master UI | `http://localhost:8084` |
+| Local Streamlit dashboard | `http://localhost:8501` |
+| Kafka Connect REST API | `http://localhost:8083` |
 
-Watch the important logs:
-
-```powershell
-docker compose logs -f ran-generator weather-producer spark-stream connect s3-connector-init
-```
-
-## Local URLs
-
-- Kafka UI: `http://localhost:8090`
-- Spark master UI: `http://localhost:8084`
-- Streamlit dashboard: `http://localhost:8501`
-- Kafka Connect REST API: `http://localhost:8083`
-
-## Verify Streaming
-
-Check that Spark has written Kafka events into Postgres:
+Verify Postgres streaming output:
 
 ```powershell
 docker compose exec -T postgres psql -U towerhealth -d towerhealth -c "SELECT topic, COUNT(*) AS rows, MAX(event_time) AS latest_event FROM kafka_events GROUP BY topic ORDER BY topic;"
 ```
 
-Preview the latest messages:
+## EC2 Batch Pipeline
 
-```powershell
-docker compose exec -T postgres psql -U towerhealth -d towerhealth -c "SELECT topic, kafka_partition, kafka_offset, event_time, LEFT(message_value, 120) AS preview FROM kafka_events ORDER BY event_time DESC LIMIT 5;"
-```
+The verified Airflow DAG is `airflow/dags/ran_pipeline_dag.py`.
 
-## S3 Output
-
-Kafka Connect writes objects with built-in names like:
+It defines this task graph:
 
 ```text
-raw-data/ran_telemetry/year=2026/month=05/day=19/ran_telemetry+0+0000000219.json
+silver -> [gold, ml_prep]
+ml_prep -> resolve_partition -> predict
+[gold, predict] -> refresh_snowflake
 ```
 
-The folder path is time-based. The object filename is generated by the S3 connector from topic, partition, and offset.
+Runtime assumptions from the EC2 backup:
 
-Useful settings:
+| Setting | Value |
+|---|---|
+| Virtual environment | `/home/ubuntu/towerhealth-env312` |
+| Spark jobs directory | `/opt/ml` |
+| Airflow DAG ID | `ran_pipeline` |
+| Schedule | Manual trigger (`schedule=None`) |
+| Retries | `0` |
+| S3 bucket | `tower-iti-project` |
+
+The Snowflake refresh task reads these environment variables:
 
 ```env
-S3_PREFIX=raw-data
-S3_ROTATE_INTERVAL_MS=900000
-S3_FLUSH_SIZE=1000
+SNOWFLAKE_ACCOUNT=rmb62104
+SNOWFLAKE_USER=towerproject
+SNOWFLAKE_PASSWORD=...
+SNOWFLAKE_WAREHOUSE=COMPUTE_WH
+SNOWFLAKE_DATABASE=TOWER_HEALTH_DB
+SNOWFLAKE_SCHEMA=PUBLIC
 ```
 
-## Notes
+## Snowflake
 
-- `startingOffsets=latest` in the Spark stream means a fresh checkpoint reads new Kafka messages only.
-- Postgres uses `UNIQUE (topic, kafka_partition, kafka_offset)` to prevent duplicate rows if Spark retries a batch.
-- The RAN generator supports `stdout`, `file`, `both`, and `kafka` modes through `OUTPUT_MODE`.
-- The weather producer supports `stdout` and `kafka` modes.
+The main setup file is:
+
+```text
+snowflake/tower_health_gold_setup.sql
+```
+
+It creates:
+
+- Parquet file format `TOWER_PARQUET_FMT`
+- CSV file format `CSV_PREDICTIONS`
+- 10 Parquet external tables for Gold BI outputs
+- 1 CSV external table for `FACT_ML_PREDICTIONS`
+- External table refresh statements
+
+The Cortex Analyst semantic model is:
+
+```text
+snowflake/tower_health_semantic_model.yaml
+```
+
+The EC2 Streamlit app references:
+
+```text
+@TOWER_HEALTH_DB.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml
+```
+
+## Streamlit Apps
+
+### EC2 Streamlit
+
+Path:
+
+```text
+streamlit/tower_health_streamlit.py
+```
+
+Install app dependencies:
+
+```bash
+pip install -r streamlit/requirements.txt
+```
+
+Runtime files required on EC2:
+
+```text
+~/.streamlit/secrets.toml
+/home/ubuntu/.streamlit/rsa_key.p8
+```
+
+Use `streamlit/secrets.example.toml` as the safe template.
+
+Run:
+
+```bash
+streamlit run streamlit/tower_health_streamlit.py --server.port 8501
+```
+
+### Snowflake Streamlit
+
+The Snowflake app export is in:
+
+```text
+streamlit_snowflake/
+```
+
+It includes:
+
+- `snowflake.yml`
+- `TOWER_HEALTH_NOC.py`
+- `pyproject.toml`
+- `.streamlit/config.toml`
+
+## ML Inference
+
+The EC2 inference files are in `ml/`.
+
+```bash
+pip install -r ml/requirements.txt
+python ml/predict_s3.py \
+  --input s3://tower-iti-project/gold/ran_ml_input/gold_date=YYYY-MM-DD/ \
+  --output s3://tower-iti-project/gold/ran_ml_predictions/YYYY-MM-DD_predictions.csv \
+  --model ml/ran_cell_model.txt \
+  --meta ml/ran_cell_model_features.json
+```
+
+Prediction output columns:
+
+```text
+timestamp, site_id, cell_id, failure_probability, predicted_failure, risk_level
+```
+
+Risk labels:
+
+| Label | Probability range |
+|---|---|
+| `LOW` | `< 0.30` |
+| `MEDIUM` | `0.30 - 0.55` |
+| `HIGH` | `0.55 - 0.75` |
+| `CRITICAL` | `>= 0.75` |
+
+## Documentation
+
+The enhanced technical documentation is:
+
+```text
+docs/tower_health_project_v2.md
+```
+
+It includes:
+
+- Verified EC2 Airflow DAG
+- PySpark job details
+- Snowflake table and semantic model mappings
+- Streamlit JWT auth and Cortex API call structure
+- Code inventory
+- TODO markers for files that were not present in the backup, especially SQL view DDL and PBIX metadata
+
+## Before Pushing
+
+Check the repo:
+
+```powershell
+git status --short
+git diff --check
+```
+
+Do not commit:
+
+- `.env`
+- private keys such as `.pem` or `.p8`
+- Streamlit `secrets.toml`
+- Airflow DB/logs/admin password files
+- generated Parquet/CSV datasets
+
+Recommended commit:
+
+```powershell
+git add .
+git status --short
+git commit -m "Prepare Tower Health graduation project"
+git push
+```

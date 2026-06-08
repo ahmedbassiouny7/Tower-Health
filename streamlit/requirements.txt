@@ -1,0 +1,6 @@
+streamlit
+requests
+PyJWT
+cryptography
+snowflake-connector-python[pandas]
+pandas

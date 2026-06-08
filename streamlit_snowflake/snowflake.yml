@@ -1,0 +1,18 @@
+definition_version: 2
+entities:
+  streamlit_app:
+    type: streamlit
+    identifier:
+      database: TOWER_HEALTH_DB
+      schema: PUBLIC
+      name: UNTITLED
+    title: TOWER_HEALTH_NOC
+    query_warehouse: COMPUTE_WH
+    compute_pool: SYSTEM_COMPUTE_POOL_CPU
+    run_mode: SpcsOnly
+    execute_as: OWNER
+    main_file: TOWER_HEALTH_NOC.py
+    artifacts:
+      - pyproject.toml
+      - TOWER_HEALTH_NOC.py
+      - .streamlit/config.toml

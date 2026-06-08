@@ -1,5 +1,56 @@
-#.env
-.claude
+# Local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p8
+*key*.pem
+*password*.txt
+secrets.toml
+.streamlit/secrets.toml
+
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Logs and runtime state
+logs/
+*.log
+*.pid
+*.db
+*.sqlite
+*.sqlite3
+
+# Airflow local runtime files
+airflow/airflow.cfg
+airflow/airflow.db
+airflow/logs/
+airflow/standalone_admin_password.txt
+airflow/airflow-webserver.pid
+
+# Generated data and local test outputs
 *.jsonl
+*.parquet
+*.csv
+*.pkl
+!cell_level_prediction/testing/predictions/.gitkeep
+data/
+tmp/
+historical_ran/
+
+# Notebook/editor noise
+.ipynb_checkpoints/
+.claude/
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,909 @@
+# =====================================================================
+# Tower Health — Cortex Analyst Semantic Model  (v3, reworked schema)
+# =====================================================================
+# Source: TOWER_HEALTH_DB.PUBLIC external tables over S3 Gold (Parquet/CSV).
+# Reconciled against the post-rework column inventory (2026-06-06).
+#
+# ---------------------------------------------------------------------
+# WHAT CHANGED IN v3 (vs the previous draft)
+# ---------------------------------------------------------------------
+#   - DIM_TECHNOLOGY  : DROPPED. Technology is now read from
+#                       DIM_CELL."technology" (4G/5G). The technology
+#                       dimension + cellperf_to_technology relationship
+#                       are removed, and the orphaned FACT_CELLS
+#                       "technology_sk" key is no longer modeled.
+#   - DIM_SECTOR      : DROPPED (absent from inventory). The sector
+#                       dimension + cellperf_to_sector relationship are
+#                       removed, and the orphaned "Sector_key" on
+#                       FACT_CELLS is no longer modeled.
+#   - DIM_SITE.region : VERIFIED -> Alexandria / Cairo / Giza /
+#                       North Sinai. Region is now usable in filters and
+#                       the "poor signal in Alexandria" verified query.
+#   - FACT_CELLS      : "RAN_key" added as a node key; ~14 new KPI
+#                       measures exposed (BLER uplink, HARQ, latency,
+#                       spectral efficiency, eRAB, handover detail, etc.).
+#   - DIM_TIME        : time_label exposed.
+#
+# ---------------------------------------------------------------------
+# CASE-SENSITIVE IDENTIFIERS
+# ---------------------------------------------------------------------
+# Columns were created as quoted, mixed/lower-case identifiers
+# (e.g. site_name, rsrp_dbm, BBU_cpu_utilization_percent, Date). In
+# Snowflake these MUST be double-quoted with exact case, so every Parquet
+# expr is written as  '"col_name"'. FACT_ML_PREDICTIONS (CSV) uses
+# UPPER-case unquoted identifiers. Do NOT change the casing.
+#
+# CLEANER ALTERNATIVE (you already started this with DIM_RU_V): wrap each
+# external table in a VIEW that aliases columns to UPPER_SNAKE and drops
+# the raw VALUE payload, then point base_table at the views. That removes
+# all quoting and helps Power BI too. Say the word and I'll generate the
+# remaining view DDLs and re-point this model.
+#
+# ---------------------------------------------------------------------
+# ALARM->SITE GAP — CLOSED (2026-06-06):
+#   FACT_ALARMS."RAN_key" is now populated as md5(site_id), which equals
+#   DIM_SITE."site_sk". An alarm->site relationship is wired below, so
+#   "alarms by tower" and "alarms in Cairo" resolve directly.
+#   FACT_RAN now carries "site_id" as a real column (from the rebuild),
+#   so equipment_health->site joins on site_id->site_id.
+# =====================================================================
+
+name: tower_health
+description: >
+  Telecom RAN tower health, performance, and alarm analytics for Egyptian
+  network infrastructure. FACT_CELLS holds cell radio-performance KPIs
+  (signal quality, utilization, success rates, throughput, latency,
+  handovers). FACT_RAN holds site equipment-health telemetry (radio
+  units, baseband, power, batteries, environment, transport links).
+  FACT_ALARMS holds network alarms. FACT_ML_PREDICTIONS holds LightGBM
+  failure-probability forecasts per site and cell. Supports questions in
+  English and Arabic.
+
+tables:
+
+  # ===================================================================
+  # DIMENSIONS
+  # ===================================================================
+
+  - name: site
+    description: Physical telecom tower site. 4 sites across Egypt. Use "region" for city/governorate questions.
+    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: V_SITE}
+    primary_key: {columns: ['site_sk']}
+    dimensions:
+      - name: site_sk
+        expr: 'SITE_SK'
+        data_type: TEXT
+        unique: true
+      - name: site_id
+        expr: 'SITE_ID'
+        data_type: TEXT
+        synonyms: ["site code", "معرف الموقع"]
+      - name: site_name
+        expr: 'SITE_NAME'
+        data_type: TEXT
+        synonyms: ["tower", "tower name", "site", "البرج", "اسم البرج", "الموقع"]
+        sample_values: ["AL_TOWER_01", "CA_TOWER_02", "GZ_TOWER_03", "KS_TOWER_04"]
+      - name: region
+        expr: 'REGION'
+        data_type: TEXT
+        synonyms: ["governorate", "province", "city", "area", "المحافظة", "المنطقة", "المدينة"]
+        sample_values: ["Alexandria", "Cairo", "Giza", "North Sinai"]
+      - name: vendor
+        expr: 'VENDOR'
+        data_type: TEXT
+        synonyms: ["manufacturer", "المورد", "الشركة المصنعة"]
+      - name: latitude
+        expr: 'LATITUDE'
+        data_type: FLOAT
+        synonyms: ["lat"]
+      - name: longitude
+        expr: 'LONGITUDE'
+        data_type: FLOAT
+        synonyms: ["lon", "lng"]
+
+    measures:
+      - name: site_count
+        expr: 'SITE_SK'
+        data_type: NUMBER
+        default_aggregation: count_distinct
+        synonyms: ["number of sites", "total sites", "how many sites", "عدد المواقع"]
+  - name: cell
+    description: >
+      Logical radio cell. 12 cells (4G + 5G). Links to site via site_id.
+      Carries the radio technology (4G/5G) directly — there is no separate
+      technology dimension. Group by "technology" for per-generation KPIs.
+    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: V_CELL}
+    primary_key: {columns: ['cell_sk']}
+    dimensions:
+      - name: cell_sk
+        expr: 'CELL_SK'
+        data_type: TEXT
+        unique: true
+      - name: cell_id
+        expr: 'CELL_ID'
+        data_type: TEXT
+        synonyms: ["cell", "الخلية"]
+      - name: site_id
+        expr: 'SITE_ID'
+        data_type: TEXT
+      - name: sector_id
+        expr: 'sector_id'
+        data_type: TEXT
+        synonyms: ["sector", "القطاع"]
+      - name: technology
+        expr: 'TECHNOLOGY'
+        data_type: TEXT
+        synonyms: ["radio tech", "generation", "4g", "5g", "التقنية", "الجيل"]
+        sample_values: ["4G", "5G"]   # << VERIFY exact casing if questioned: SELECT DISTINCT "technology" FROM DIM_CELL;
+      - name: bandwidth_mhz
+        expr: 'BANDWIDTH_MHZ'
+        data_type: NUMBER
+        synonyms: ["bandwidth", "عرض النطاق"]
+      - name: carrier_frequency_mhz
+        expr: 'CARRIER_FREQUENCY_MHZ'
+        data_type: NUMBER
+        synonyms: ["frequency", "carrier", "التردد"]
+
+    measures:
+      - name: cell_count
+        expr: cell_sk
+        data_type: NUMBER
+        default_aggregation: count_distinct
+        synonyms: ["number of cells", "total cells", "how many cells", "عدد الخلايا"]
+  - name: radio_unit
+    description: Radio unit (RU) equipment inventory. Standalone (no clean fact join).
+    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: DIM_RU}
+    primary_key: {columns: ['RU_sk']}
+    dimensions:
+      - name: ru_sk
+        expr: 'RU_sk'
+        data_type: TEXT
+        unique: true
+      - name: ru_id
+        expr: 'ru_id'
+        data_type: TEXT
+        synonyms: ["radio unit", "RU", "وحدة الراديو"]
+      - name: sector_id
+        expr: 'sector_id'
+        data_type: TEXT
+
+    measures:
+      - name: ru_count
+        expr: ru_sk
+        data_type: NUMBER
+        default_aggregation: count_distinct
+        synonyms: ["number of radio units", "total radio units", "عدد وحدات الراديو"]
+  - name: antenna
+    description: Antenna equipment inventory. Standalone (no clean fact join).
+    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: DIM_ANTENNA}
+    primary_key: {columns: ['antenna_sk']}
+    dimensions:
+      - name: antenna_sk
+        expr: 'antenna_sk'
+        data_type: TEXT
+        unique: true
+      - name: antenna_id
+        expr: 'antenna_id'
+        data_type: TEXT
+        synonyms: ["antenna", "الهوائي"]
+      - name: sector_id
+        expr: 'sector_id'
+        data_type: TEXT
+      - name: mimo_layers
+        expr: 'mimo_layers'
+        data_type: NUMBER
+        synonyms: ["mimo", "layers"]
+      - name: azimuth_degree
+        expr: 'azimuth_degree'
+        data_type: NUMBER
+        synonyms: ["azimuth", "bearing", "زاوية السمت"]
+      - name: tilt_degree
+        expr: 'tilt_degree'
+        data_type: FLOAT
+        synonyms: ["tilt", "downtilt", "الإمالة"]
+
+    measures:
+      - name: antenna_count
+        expr: antenna_sk
+        data_type: NUMBER
+        default_aggregation: count_distinct
+        synonyms: ["number of antennas", "total antennas", "عدد الهوائيات"]
+  - name: link
+    description: Backhaul transport link (Fiber / Microwave). Standalone inventory.
+    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: DIM_LINK}
+    primary_key: {columns: ['link_sk']}
+    dimensions:
+      - name: link_sk
+        expr: 'link_sk'
+        data_type: TEXT
+        unique: true
+      - name: link_id
+        expr: 'link_id'
+        data_type: TEXT
+      - name: link_type
+        expr: 'link_type'
+        data_type: TEXT
+        synonyms: ["transport", "backhaul", "النقل", "نوع الوصلة"]
+        sample_values: ["FIBER", "MICROWAVE"]
+
+    measures:
+      - name: link_count
+        expr: link_sk
+        data_type: NUMBER
+        default_aggregation: count_distinct
+        synonyms: ["number of links", "total links", "عدد الروابط"]
+  - name: date
+    description: Calendar date dimension (~730 days). PK is date_sk; "Date" is the real date.
+    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: V_DATE}
+    primary_key: {columns: ['date_sk']}
+    dimensions:
+      - name: date_sk
+        expr: 'DATE_SK'
+        data_type: NUMBER
+        unique: true
+      - name: year
+        expr: 'YEAR'
+        data_type: NUMBER
+        synonyms: ["السنة"]
+      - name: month
+        expr: 'MONTH'
+        data_type: NUMBER
+      - name: month_name
+        expr: 'MonthName'
+        data_type: TEXT
+        synonyms: ["month", "الشهر"]
+      - name: quarter
+        expr: 'quarter'
+        data_type: NUMBER
+        synonyms: ["الربع"]
+      - name: quarter_name
+        expr: 'quarterName'
+        data_type: TEXT
+        synonyms: ["quarter", "اسم الربع"]
+      - name: day_of_month
+        expr: 'DAY_OF_MONTH'
+        data_type: NUMBER
+        synonyms: ["day", "اليوم"]
+      - name: day_of_week
+        expr: 'DayOfWeek'
+        data_type: TEXT
+        synonyms: ["weekday", "يوم الأسبوع"]
+      - name: week_of_year
+        expr: 'WeekOfYear'
+        data_type: NUMBER
+        synonyms: ["week", "الأسبوع"]
+    time_dimensions:
+      - name: full_date
+        expr: 'FULL_DATE'
+        data_type: DATE
+        unique: true
+        synonyms: ["date", "day", "calendar date", "التاريخ", "اليوم"]
+
+  - name: time_of_day
+    description: Time-of-day dimension. PK is time_pk.
+    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: DIM_TIME}
+    primary_key: {columns: ['time_pk']}
+    dimensions:
+      - name: time_pk
+        expr: 'time_pk'
+        data_type: NUMBER
+        unique: true
+      - name: hour
+        expr: 'Hour'
+        data_type: NUMBER
+        synonyms: ["hour of day", "الساعة"]
+      - name: minute
+        expr: 'Minute'
+        data_type: NUMBER
+      - name: time_label
+        expr: 'time_label'
+        data_type: TEXT
+        synonyms: ["time", "clock time", "الوقت"]
+      - name: day_part
+        expr: 'DayPart'
+        data_type: TEXT
+        synonyms: ["part of day", "morning afternoon evening", "فترة اليوم"]
+      - name: business_hours
+        expr: 'BusinessHours'
+        data_type: TEXT
+        synonyms: ["working hours", "ساعات العمل"]
+
+  # ===================================================================
+  # FACTS
+  # ===================================================================
+
+  - name: cell_performance              # FACT_CELLS — radio/signal KPIs
+    description: >
+      Per-cell radio performance snapshots: signal quality (RSRP/RSRQ/
+      SINR/CQI), utilization, throughput, latency, success rates, drops,
+      BLER, HARQ, and handovers. Use this for any signal/quality/
+      performance question. Join to site goes through the cell dimension;
+      group by cell."technology" for per-generation (4G/5G) breakdowns.
+    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: V_CELL_PERFORMANCE}
+    dimensions:
+      - name: cell_key
+        expr: 'CELL_KEY'
+        data_type: TEXT
+      - name: ran_key
+        expr: 'RAN_KEY'
+        data_type: TEXT
+        synonyms: ["ran node", "node", "العقدة"]
+      - name: date_key
+        expr: 'DATE_KEY'
+        data_type: NUMBER
+      - name: time_key
+        expr: 'TIME_KEY'
+        data_type: NUMBER
+      - name: cell_status
+        expr: 'cell_status'
+        data_type: TEXT
+        synonyms: ["status", "حالة الخلية"]
+      - name: op_state
+        expr: 'op_state'
+        data_type: TEXT
+        synonyms: ["operational state", "الحالة التشغيلية"]
+      - name: congestion_flag
+        expr: 'congestion_flag'
+        data_type: NUMBER
+        synonyms: ["congested", "congestion", "الازدحام"]
+    time_dimensions:
+      - name: snapshot_ts
+        expr: 'timestamp'
+        data_type: TIMESTAMP_NTZ
+        synonyms: ["time", "snapshot time", "الوقت"]
+    measures:
+      - name: site_count
+        expr: ran_key
+        data_type: NUMBER
+        default_aggregation: count_distinct
+        synonyms: ["number of sites", "total sites", "how many sites", "عدد المواقع", "sites"]
+      - name: cell_count
+        expr: cell_key
+        data_type: NUMBER
+        default_aggregation: count_distinct
+        synonyms: ["number of cells", "total cells", "how many cells", "عدد الخلايا", "cells"]
+      - name: rsrp_dbm
+        expr: 'RSRP_DBM'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["rsrp", "signal strength", "قوة الإشارة"]
+      - name: rsrq_db
+        expr: 'RSRQ_DB'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["rsrq", "signal quality", "جودة الإشارة"]
+      - name: sinr_db
+        expr: 'SINR_DB'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["sinr", "signal to noise", "نسبة الإشارة للضوضاء"]
+      - name: cqi_avg
+        expr: 'CQI_AVG'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["cqi", "channel quality", "جودة القناة"]
+      - name: spectral_efficiency_bps_per_hz
+        expr: 'SPECTRAL_EFFICIENCY_BPS_PER_HZ'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["spectral efficiency", "الكفاءة الطيفية"]
+      - name: prb_utilization_percent
+        expr: 'PRB_UTILIZATION_PERCENT'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["prb utilization", "load", "الحمل", "استخدام الموارد"]
+      - name: throughput_downlink_mbps
+        expr: 'THROUGHPUT_DOWNLINK_MBPS'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["downlink throughput", "download speed", "سرعة التنزيل"]
+      - name: throughput_uplink_mbps
+        expr: 'THROUGHPUT_UPLINK_MBPS'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["uplink throughput", "upload speed", "سرعة الرفع"]
+      - name: traffic_volume_gb
+        expr: 'TRAFFIC_VOLUME_GB'
+        data_type: FLOAT
+        default_aggregation: sum
+        synonyms: ["traffic", "data volume", "حجم البيانات"]
+      - name: latency_downlink_ms
+        expr: 'LATENCY_DOWNLINK_MS'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["downlink latency", "زمن الاستجابة للتنزيل"]
+      - name: latency_uplink_ms
+        expr: 'LATENCY_UPLINK_MS'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["uplink latency", "زمن الاستجابة للرفع"]
+      - name: rrc_connection_attempts
+        expr: 'RRC_CONNECTION_ATTEMPTS'
+        data_type: NUMBER
+        default_aggregation: sum
+        synonyms: ["rrc attempts", "connection attempts", "محاولات الاتصال"]
+      - name: rrc_success_rate_percent
+        expr: 'RRC_SUCCESS_RATE_PERCENT'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["rrc success", "connection success", "نسبة نجاح الاتصال"]
+      - name: erab_setup_success_rate_percent
+        expr: 'ERAB_SETUP_SUCCESS_RATE_PERCENT'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["erab success", "bearer setup success", "نجاح إعداد الحامل"]
+      - name: call_drop_rate_percent
+        expr: 'CALL_DROP_RATE_PERCENT'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["drop rate", "dropped calls", "معدل انقطاع المكالمات"]
+      - name: abnormal_release_rate_percent
+        expr: 'abnormal_release_rate_percent'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["abnormal release", "معدل الإنهاء غير الطبيعي"]
+      - name: bler_downlink_percent
+        expr: 'BLER_DOWNLINK_PERCENT'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["bler downlink", "downlink block error rate", "معدل خطأ الكتلة للتنزيل"]
+      - name: bler_uplink_percent
+        expr: 'BLER_UPLINK_PERCENT'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["bler uplink", "uplink block error rate", "معدل خطأ الكتلة للرفع"]
+      - name: harq_retransmission_rate_percent
+        expr: 'harq_retransmission_rate_percent'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["harq", "retransmission rate", "معدل إعادة الإرسال"]
+      - name: handover_attempts
+        expr: 'handover_attempts'
+        data_type: NUMBER
+        default_aggregation: sum
+        synonyms: ["handover attempts", "محاولات التسليم"]
+      - name: handover_failures
+        expr: 'handover_failures'
+        data_type: NUMBER
+        default_aggregation: sum
+        synonyms: ["handover failures", "فشل التسليم"]
+      - name: handover_success_rate_percent
+        expr: 'HANDOVER_SUCCESS_RATE_PERCENT'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["handover success", "نسبة نجاح التسليم"]
+      - name: connected_users
+        expr: 'connected_users'
+        data_type: NUMBER
+        default_aggregation: avg
+        synonyms: ["users", "subscribers", "المستخدمون"]
+      - name: active_users
+        expr: 'active_users'
+        data_type: NUMBER
+        default_aggregation: avg
+        synonyms: ["active users", "المستخدمون النشطون"]
+      - name: peak_users
+        expr: 'peak_users'
+        data_type: NUMBER
+        default_aggregation: max
+        synonyms: ["peak users", "max users", "ذروة المستخدمين"]
+      - name: snapshot_count
+        expr: '1'
+        data_type: NUMBER
+        default_aggregation: count
+        synonyms: ["records", "number of snapshots", "عدد القياسات"]
+
+  - name: equipment_health              # FACT_RAN — infrastructure telemetry
+    description: >
+      Per-RAN-node equipment-health snapshots: radio units (RU1-3),
+      baseband (BBU), power (rectifiers, batteries, generator),
+      environment (temp, humidity, door, smoke), and transport links.
+      Wide denormalized row; RU/antenna/link instances live as columns.
+      Joins to site directly via site_id, and to date/time via the
+      surrogate keys.
+    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: FACT_RAN}
+    dimensions:
+      - name: site_id
+        expr: 'SITE_ID'
+        data_type: TEXT
+        synonyms: ["site", "tower", "البرج", "الموقع"]
+      - name: ran_key
+        expr: 'RAN_KEY'
+        data_type: TEXT
+        synonyms: ["ran node", "site node", "tower node", "node", "عقدة الشبكة"]
+      - name: date_key
+        expr: 'DATE_KEY'
+        data_type: NUMBER
+      - name: time_key
+        expr: 'TIME_KEY'
+        data_type: NUMBER
+      - name: power_status
+        expr: 'power_status'
+        data_type: TEXT
+        synonyms: ["power", "حالة الطاقة"]
+      - name: env_status
+        expr: 'env_status'
+        data_type: TEXT
+        synonyms: ["environment status", "حالة البيئة"]
+      - name: smoke_detected
+        expr: 'smoke_detected'
+        data_type: BOOLEAN
+        synonyms: ["smoke", "fire alarm", "كشف الدخان"]
+      - name: door_status
+        expr: 'door_status'
+        data_type: TEXT
+        synonyms: ["door", "حالة الباب"]
+      - name: generator_status
+        expr: 'generator_status'
+        data_type: TEXT
+        synonyms: ["generator", "المولد"]
+    time_dimensions:
+      - name: snapshot_ts
+        expr: 'timestamp'
+        data_type: TIMESTAMP_NTZ
+        synonyms: ["time", "snapshot time", "الوقت"]
+    measures:
+      - name: bbu_cpu_utilization_percent
+        expr: 'BBU_cpu_utilization_percent'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["bbu cpu", "cpu utilization", "استخدام المعالج"]
+      - name: bbu_memory_utilization_percent
+        expr: 'BBU_memory_utilization_percent'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["bbu memory", "memory utilization", "استخدام الذاكرة"]
+      - name: battery1_charge_percent
+        expr: 'battery1_charge_percent'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["battery charge", "battery level", "شحن البطارية"]
+      - name: rect1_output_voltage_volt
+        expr: 'rect1_output_voltage_volt'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["rectifier voltage", "جهد المقوم"]
+      - name: ru1_temperature_c
+        expr: 'RU1_temperature_c'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["ru1 temperature", "radio unit 1 temperature", "حرارة وحدة الراديو 1"]
+      - name: ru2_temperature_c
+        expr: 'RU2_temperature_c'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["ru2 temperature", "radio unit 2 temperature", "حرارة وحدة الراديو 2"]
+      - name: ru3_temperature_c
+        expr: 'RU3_temperature_c'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["ru3 temperature", "radio unit 3 temperature", "حرارة وحدة الراديو 3"]
+      - name: ru1_vswr
+        expr: 'RU1_vswr'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["ru1 vswr", "standing wave ratio"]
+      - name: ru2_vswr
+        expr: 'RU2_vswr'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["ru2 vswr"]
+      - name: ru3_vswr
+        expr: 'RU3_vswr'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["ru3 vswr"]
+      - name: temp_sensor1_value_c
+        expr: 'temp_sensor1_value_c'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["site temperature", "ambient temperature", "درجة الحرارة"]
+      - name: humidity_percent
+        expr: 'Humd_sensor_value_percent'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["humidity", "الرطوبة"]
+      - name: gen_fuel_level_percent
+        expr: 'gen_fuel_level_percent'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["generator fuel", "fuel level", "مستوى الوقود"]
+      - name: link1_latency_ms
+        expr: 'link1_latency_ms'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["backhaul latency", "transport latency", "زمن الاستجابة"]
+      - name: link1_packet_loss_percent
+        expr: 'link1_packet_loss_percent'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["packet loss", "فقد الحزم"]
+      - name: snapshot_count
+        expr: '1'
+        data_type: NUMBER
+        default_aggregation: count
+        synonyms: ["records", "عدد القياسات"]
+
+  - name: alarm                         # FACT_ALARMS
+    description: >
+      Network alarms. One row per alarm. Joins to site via
+      "site_key" -> "site_sk" (both are md5(site_id)), so "alarms by tower"
+      and "alarms in <region>" resolve naturally. Group by severity,
+      category, or component_key for component-level breakdowns.
+      NOTE: the equivalent join column on FACT_CELLS is named "RAN_key" —
+      same value, different name. Both equal md5(site_id) = site_sk.
+    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: V_ALARM}
+    dimensions:
+      - name: site_key
+        expr: 'SITE_KEY'
+        data_type: TEXT
+        synonyms: ["site key", "tower key"]
+      - name: component_key
+        expr: 'COMPONENT_KEY'
+        data_type: TEXT
+        synonyms: ["component", "المكون"]
+      - name: severity
+        expr: 'SEVERITY'
+        data_type: TEXT
+        synonyms: ["alarm severity", "priority", "الخطورة", "الأولوية"]
+        sample_values: ["CRITICAL", "WARNING", "INFO"]
+      - name: alarm_category
+        expr: 'ALARM_CATEGORY'
+        data_type: TEXT
+        synonyms: ["category", "alarm type", "نوع الإنذار", "فئة الإنذار"]
+        sample_values: ["environment", "power", "core", "security", "transport", "radio", "mobility"]
+      - name: alarm_msg
+        expr: 'ALARM_MSG'
+        data_type: TEXT
+        synonyms: ["message", "description", "رسالة الإنذار"]
+      - name: date_key
+        expr: 'DATE_KEY'
+        data_type: NUMBER
+      - name: time_key
+        expr: 'TIME_KEY'
+        data_type: NUMBER
+    time_dimensions:
+      - name: alarm_ts
+        expr: 'SNAPSHOT_TIME'
+        data_type: TIMESTAMP_NTZ
+        synonyms: ["alarm time", "raised at", "وقت الإنذار"]
+    measures:
+      - name: alarm_count
+        expr: '1'
+        data_type: NUMBER
+        default_aggregation: count
+        synonyms: ["number of alarms", "alarms", "count", "عدد الإنذارات"]
+
+  - name: ml_predictions                 # FACT_ML_PREDICTIONS — failure probabilities
+    description: >
+      ML failure predictions per site per cell per hour. LightGBM model
+      outputs a failure probability (0–1) and risk level. Joins directly
+      to DIM_SITE via SITE_ID — unlike FACT_ALARMS, this table HAS a site
+      foreign key. Use for "which towers will fail?" and risk-trend
+      queries. Identifiers are UPPER-case unquoted (CSV source).
+    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: FACT_ML_PREDICTIONS}
+    dimensions:
+      - name: site_id
+        expr: 'SITE_ID'
+        data_type: TEXT
+        synonyms: ["site", "tower", "البرج", "الموقع"]
+      - name: cell_id
+        expr: 'CELL_ID'
+        data_type: TEXT
+        synonyms: ["cell", "الخلية"]
+      - name: predicted_failure
+        expr: 'PREDICTED_FAILURE'
+        data_type: NUMBER
+        synonyms: ["failure flag", "will fail", "توقع فشل"]
+        sample_values: ["0", "1"]
+      - name: risk_level
+        expr: 'RISK_LEVEL'
+        data_type: TEXT
+        synonyms: ["risk", "risk category", "مستوى الخطر"]
+        sample_values: ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    time_dimensions:
+      - name: prediction_date
+        expr: 'PREDICTION_DATE'
+        data_type: DATE
+        synonyms: ["prediction day", "forecast date", "تاريخ التوقع"]
+      - name: observation_ts
+        expr: 'TIMESTAMP_COL'
+        data_type: TIMESTAMP_NTZ
+        synonyms: ["observation time", "kpi timestamp", "وقت القياس"]
+    measures:
+      - name: failure_probability
+        expr: 'FAILURE_PROBABILITY'
+        data_type: FLOAT
+        default_aggregation: avg
+        synonyms: ["failure prob", "failure risk", "probability", "احتمال الفشل"]
+      - name: prediction_count
+        expr: '1'
+        data_type: NUMBER
+        default_aggregation: count
+        synonyms: ["predictions", "number of predictions", "عدد التوقعات"]
+
+# =====================================================================
+# RELATIONSHIPS
+# (left_column / right_column reference the LOGICAL dimension names above,
+#  not the raw physical columns.)
+# =====================================================================
+relationships:
+
+  # ---- FACT_CELLS -> dims ----
+  - name: cellperf_to_site
+    left_table: cell_performance
+    right_table: site
+    relationship_columns: [{left_column: ran_key, right_column: site_sk}]
+    join_type: left_outer
+    relationship_type: many_to_one
+  - name: cellperf_to_cell
+    left_table: cell_performance
+    right_table: cell
+    relationship_columns: [{left_column: cell_key, right_column: cell_sk}]
+    join_type: left_outer
+    relationship_type: many_to_one
+  - name: cellperf_to_date
+    left_table: cell_performance
+    right_table: date
+    relationship_columns: [{left_column: date_key, right_column: date_sk}]
+    join_type: left_outer
+    relationship_type: many_to_one
+  - name: cellperf_to_time
+    left_table: cell_performance
+    right_table: time_of_day
+    relationship_columns: [{left_column: time_key, right_column: time_pk}]
+    join_type: left_outer
+    relationship_type: many_to_one
+
+  # ---- dim_cell -> dim_site (two-hop path to site/region) ----
+  - name: cell_to_site
+    left_table: cell
+    right_table: site
+    relationship_columns: [{left_column: site_id, right_column: site_id}]
+    join_type: left_outer
+    relationship_type: many_to_one
+
+  # ---- FACT_RAN -> dims ----
+  - name: ran_to_site
+    left_table: equipment_health
+    right_table: site
+    relationship_columns: [{left_column: site_id, right_column: site_id}]
+    join_type: left_outer
+    relationship_type: many_to_one
+  - name: ran_to_date
+    left_table: equipment_health
+    right_table: date
+    relationship_columns: [{left_column: date_key, right_column: date_sk}]
+    join_type: left_outer
+    relationship_type: many_to_one
+  - name: ran_to_time
+    left_table: equipment_health
+    right_table: time_of_day
+    relationship_columns: [{left_column: time_key, right_column: time_pk}]
+    join_type: left_outer
+    relationship_type: many_to_one
+
+  # ---- FACT_ALARMS -> dims ----
+  - name: alarm_to_site
+    left_table: alarm
+    right_table: site
+    relationship_columns: [{left_column: site_key, right_column: site_sk}]
+    join_type: left_outer
+    relationship_type: many_to_one
+  - name: alarm_to_date
+    left_table: alarm
+    right_table: date
+    relationship_columns: [{left_column: date_key, right_column: date_sk}]
+    join_type: left_outer
+    relationship_type: many_to_one
+  - name: alarm_to_time
+    left_table: alarm
+    right_table: time_of_day
+    relationship_columns: [{left_column: time_key, right_column: time_pk}]
+    join_type: left_outer
+    relationship_type: many_to_one
+
+  # ---- FACT_ML_PREDICTIONS -> dims ----
+  - name: predictions_to_site
+    left_table: ml_predictions
+    right_table: site
+    relationship_columns: [{left_column: site_id, right_column: site_id}]
+    join_type: left_outer
+    relationship_type: many_to_one
+  - name: predictions_to_date
+    left_table: ml_predictions
+    right_table: date
+    relationship_columns: [{left_column: prediction_date, right_column: full_date}]
+    join_type: left_outer
+    relationship_type: many_to_one
+
+# =====================================================================
+# VERIFIED QUERIES  (golden examples — replace SQL with queries you've
+# actually run successfully, and update verified_at/verified_by.)
+# =====================================================================
+verified_queries:
+  - name: alarms_by_region
+    question: "Show total alarms by region"
+    verified_at: 1749254400
+    sql: |
+      SELECT s.region, COUNT(*) AS total_alarms
+      FROM __alarm AS a
+      JOIN __site AS s ON a.site_key = s.site_sk
+      GROUP BY s.region
+      ORDER BY total_alarms DESC
+
+  - name: avg_sinr_by_site
+    question: "Show average SINR by site"
+    verified_at: 1749254400
+    sql: |
+      SELECT s.site_name, s.region, AVG(f.sinr_db) AS avg_sinr_db
+      FROM __cell_performance AS f
+      JOIN __site AS s ON f.ran_key = s.site_sk
+      GROUP BY s.site_name, s.region
+      ORDER BY avg_sinr_db DESC
+
+  - name: top_cells_call_drop
+    question: "Top 3 cells by call drop rate"
+    verified_at: 1749254400
+    sql: |
+      SELECT c.cell_id, AVG(f.call_drop_rate_percent) AS avg_drop_rate
+      FROM __cell_performance AS f
+      JOIN __cell AS c ON f.cell_key = c.cell_sk
+      GROUP BY c.cell_id
+      ORDER BY avg_drop_rate DESC
+      LIMIT 3
+
+  - name: top_cells_call_drop_ar
+    question: "أعلى 3 خلايا في معدل انقطاع المكالمات"
+    verified_at: 1749254400
+    sql: |
+      SELECT c.cell_id, AVG(f.call_drop_rate_percent) AS avg_drop_rate
+      FROM __cell_performance AS f
+      JOIN __cell AS c ON f.cell_key = c.cell_sk
+      GROUP BY c.cell_id
+      ORDER BY avg_drop_rate DESC
+      LIMIT 3
+
+  - name: failure_prob_by_region
+    question: "Average failure probability by region"
+    verified_at: 1749254400
+    sql: |
+      SELECT s.region, AVG(p.failure_probability) AS avg_failure_prob
+      FROM __ml_predictions AS p
+      JOIN __site AS s ON p.site_id = s.site_id
+      GROUP BY s.region
+      ORDER BY avg_failure_prob DESC
+
+  - name: throughput_by_technology
+    question: "Show average downlink throughput by technology"
+    verified_at: 1749254400
+    sql: |
+      SELECT c.technology, AVG(f.throughput_downlink_mbps) AS avg_dl_mbps
+      FROM __cell_performance AS f
+      JOIN __cell AS c ON f.cell_key = c.cell_sk
+      GROUP BY c.technology
+      ORDER BY avg_dl_mbps DESC
+
+  - name: high_risk_towers
+    question: "Which towers are high-risk this week?"
+    verified_at: 1749254400
+    sql: |
+      SELECT p.site_id, s.site_name, s.region,
+             AVG(p.failure_probability) AS avg_failure_prob,
+             MAX(p.risk_level) AS max_risk
+      FROM __ml_predictions AS p
+      JOIN __site AS s ON p.site_id = s.site_id
+      WHERE p.risk_level IN ('HIGH', 'CRITICAL')
+        AND p.prediction_date >= DATEADD(DAY, -7, CURRENT_DATE)
+      GROUP BY p.site_id, s.site_name, s.region
+      ORDER BY avg_failure_prob DESC
+
+  - name: call_drop_by_technology
+    question: "Show call drop rate by technology"
+    verified_at: 1749254400
+    sql: |
+      SELECT c.technology, AVG(f.call_drop_rate_percent) AS avg_drop_rate
+      FROM __cell_performance AS f
+      JOIN __cell AS c ON f.cell_key = c.cell_sk
+      GROUP BY c.technology
+      ORDER BY avg_drop_rate DESC
