@@ -88,7 +88,7 @@ RAN Data Generator (Python + Faker)
         │
         ▼
    Snowflake External Tables
-   TOWER_HEALTH_DB.PUBLIC
+   YOUR_SNOWFLAKE_DATABASE.PUBLIC
    11 external tables (7 dims + 3 facts + FACT_ML_PREDICTIONS)
         │
         ├── Power BI Desktop
@@ -121,7 +121,7 @@ RAN Data Generator (Python + Faker)
 | ML — streaming | Isolation Forest | Mentioned in draft, but no readable streaming-anomaly code was found <!-- TODO: verify --> |
 | ML tracking | MLflow | Mentioned in draft; no readable MLflow code found <!-- TODO: verify --> |
 | Orchestration | Apache Airflow | EC2 config uses `SequentialExecutor`, SQLite metadata DB, manual DAG schedule |
-| Warehouse | Snowflake | Account locator `rmb62104`, warehouse `COMPUTE_WH`, database `TOWER_HEALTH_DB`, schema `PUBLIC` |
+| Warehouse | Snowflake | Account locator `YOUR_SNOWFLAKE_ACCOUNT`, warehouse `YOUR_SNOWFLAKE_WAREHOUSE`, database `YOUR_SNOWFLAKE_DATABASE`, schema `PUBLIC` |
 | AI layer | Cortex Analyst REST API | `/api/v2/cortex/analyst/message` |
 | Chat UI | Streamlit | EC2 JWT app plus Snowflake Streamlit artifact package |
 | BI | Power BI Desktop | File documented as `finalITI.pbix` <!-- TODO: verify path --> |
@@ -356,12 +356,12 @@ The markdown describes an Isolation Forest streaming layer, but no readable `/ho
 
 | Property | Value |
 |---|---|
-| Account locator | `rmb62104` |
-| EC2 JWT app host | `rmb62104.snowflakecomputing.com` |
-| Snowflake-exported app URL form seen earlier | `ffospeo-rmb62104.snowflakecomputing.com` |
-| User used in EC2 app JWT subject | `TOWERPROJECT` |
-| Warehouse | `COMPUTE_WH` |
-| Database | `TOWER_HEALTH_DB` |
+| Account locator | `YOUR_SNOWFLAKE_ACCOUNT` |
+| EC2 JWT app host | `YOUR_SNOWFLAKE_ACCOUNT.snowflakecomputing.com` |
+| Snowflake-exported app URL form seen earlier | `YOUR_SNOWFLAKE_ACCOUNT.snowflakecomputing.com` |
+| User used in EC2 app JWT subject | `YOUR_SNOWFLAKE_USER` |
+| Warehouse | `YOUR_SNOWFLAKE_WAREHOUSE` |
+| Database | `YOUR_SNOWFLAKE_DATABASE` |
 | Schema | `PUBLIC` |
 | Cortex endpoint | `/api/v2/cortex/analyst/message` |
 
@@ -374,8 +374,8 @@ The EC2 `/home/ubuntu/tower_health_streamlit.py` file is the active JWT version.
 | Private key path | `/home/ubuntu/.streamlit/rsa_key.p8` |
 | Key loading | `serialization.load_pem_private_key(...)` |
 | Public key fingerprint | DER public key SHA-256 digest, base64 encoded, prefixed with `SHA256:` |
-| JWT issuer | `RMB62104.TOWERPROJECT.<fingerprint>` |
-| JWT subject | `RMB62104.TOWERPROJECT` |
+| JWT issuer | `YOUR_SNOWFLAKE_ACCOUNT.YOUR_SNOWFLAKE_USER.<fingerprint>` |
+| JWT subject | `YOUR_SNOWFLAKE_ACCOUNT.YOUR_SNOWFLAKE_USER` |
 | JWT lifetime | 55 minutes |
 | JWT algorithm | `RS256` |
 | Cortex authorization header | `Authorization: Bearer <jwt>` |
@@ -388,14 +388,14 @@ The same EC2 app uses `snowflake.connector.connect(...)` with values from `st.se
 ```python
 payload = {
     "messages": [{"role": "user", "content": [{"type": "text", "text": question}]}],
-    "semantic_model_file": "@TOWER_HEALTH_DB.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml",
+    "semantic_model_file": "@YOUR_SNOWFLAKE_DATABASE.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml",
 }
 ```
 
 The EC2 app posts to:
 
 ```text
-https://rmb62104.snowflakecomputing.com/api/v2/cortex/analyst/message
+https://YOUR_SNOWFLAKE_ACCOUNT.snowflakecomputing.com/api/v2/cortex/analyst/message
 ```
 
 and handles Cortex content blocks of type `sql`, `text`, `error`, and `suggestions`.
@@ -406,8 +406,8 @@ Verified from Snowflake-exported files in `Downloads`:
 
 | File | Verified Detail |
 |---|---|
-| `snowflake.yml` | `definition_version: 2`; entity type `streamlit`; database `TOWER_HEALTH_DB`; schema `PUBLIC`; app identifier name `UNTITLED`; title `TOWER_HEALTH_NOC` |
-| `snowflake.yml` | `query_warehouse: COMPUTE_WH`; `compute_pool: SYSTEM_COMPUTE_POOL_CPU`; `run_mode: SpcsOnly`; `execute_as: OWNER`; `main_file: TOWER_HEALTH_NOC.py` |
+| `snowflake.yml` | `definition_version: 2`; entity type `streamlit`; database `YOUR_SNOWFLAKE_DATABASE`; schema `PUBLIC`; app identifier name `UNTITLED`; title `TOWER_HEALTH_NOC` |
+| `snowflake.yml` | `query_warehouse: YOUR_SNOWFLAKE_WAREHOUSE`; `compute_pool: SYSTEM_COMPUTE_POOL_CPU`; `run_mode: SpcsOnly`; `execute_as: OWNER`; `main_file: TOWER_HEALTH_NOC.py` |
 | `snowflake.yml` artifacts | `pyproject.toml`, `TOWER_HEALTH_NOC.py`, `.streamlit/config.toml` |
 | `pyproject.toml` | Python `~=3.11.0`; dependency `streamlit[snowflake]`; default Streamlit-in-Snowflake packages are used unless external access is configured |
 | `config.toml` | Placeholder theme file only; no custom theme keys configured |
@@ -418,7 +418,7 @@ Verified from Snowflake-exported files in `Downloads`:
 |---|---|
 | External Access Integrations | Documented as blocked in draft; not verifiable from downloaded files <!-- TODO: verify --> |
 | Cortex Analyst | Called through REST endpoint `/api/v2/cortex/analyst/message` |
-| Active EC2 semantic stage | `@TOWER_HEALTH_DB.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml` |
+| Active EC2 semantic stage | `@YOUR_SNOWFLAKE_DATABASE.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml` |
 | Upload helper stage | `upload_yaml.py` uses `@SEMANTIC_MODELS`; EC2 runtime app uses `@SEMANTIC_STAGE` |
 
 ## 11. Snowflake Objects
@@ -466,7 +466,7 @@ The actual `CREATE VIEW` statements were not present as `.sql` files in the EC2 
 The EC2 Streamlit app queries:
 
 ```sql
-SELECT * FROM TOWER_HEALTH_DB.PUBLIC.V_NOC_DAILY_SUMMARY LIMIT 1
+SELECT * FROM YOUR_SNOWFLAKE_DATABASE.PUBLIC.V_NOC_DAILY_SUMMARY LIMIT 1
 ```
 
 Fields consumed by the NOC card:
@@ -499,7 +499,7 @@ The exact refresh worksheet for this table was not present in the EC2 backup. <!
 
 | Property | Verified Value |
 |---|---|
-| Active EC2 stage path | `@TOWER_HEALTH_DB.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml` |
+| Active EC2 stage path | `@YOUR_SNOWFLAKE_DATABASE.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml` |
 | Upload helper stage path | `@SEMANTIC_MODELS` in `upload_yaml.py` |
 | File | `/home/ubuntu/tower_health_semantic_model.yaml` |
 | Size | 909 lines / 35,131 bytes |
@@ -607,7 +607,7 @@ The downloaded scheduler log shows Airflow successfully parsing and syncing `ran
 ## 13. Cortex Analyst — Semantic Model
 
 **File verified:** `/home/ubuntu/tower_health_semantic_model.yaml`
-**Active EC2 Streamlit reference:** `@TOWER_HEALTH_DB.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml`
+**Active EC2 Streamlit reference:** `@YOUR_SNOWFLAKE_DATABASE.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml`
 
 ### Model Summary
 
@@ -864,15 +864,15 @@ The downloaded scheduler log shows Airflow successfully parsing and syncing `ran
 | File | `/home/ubuntu/tower_health_streamlit.py` |
 | Header | `EC2 deployment | v7.0 — JWT key-pair auth` |
 | Runtime requirements | `~/.streamlit/secrets.toml` and `/home/ubuntu/.streamlit/rsa_key.p8` |
-| Snowflake host | `rmb62104.snowflakecomputing.com` |
+| Snowflake host | `YOUR_SNOWFLAKE_ACCOUNT.snowflakecomputing.com` |
 | Cortex endpoint | `/api/v2/cortex/analyst/message` |
-| Semantic model file | `@TOWER_HEALTH_DB.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml` |
+| Semantic model file | `@YOUR_SNOWFLAKE_DATABASE.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml` |
 
 ### Features Verified in EC2 Code
 
 | Feature | Details |
 |---|---|
-| NOC summary card | Queries `SELECT * FROM TOWER_HEALTH_DB.PUBLIC.V_NOC_DAILY_SUMMARY LIMIT 1` through `snowflake.connector.DictCursor` |
+| NOC summary card | Queries `SELECT * FROM YOUR_SNOWFLAKE_DATABASE.PUBLIC.V_NOC_DAILY_SUMMARY LIMIT 1` through `snowflake.connector.DictCursor` |
 | NOC KPI fields | `HEADLINE`, `SUMMARY_TEXT`, `GENERATED_AT`, `CRITICAL_ALARMS`, `TOTAL_ALARMS`, `AVG_FAILURE_RISK_PCT`, `HIGH_RISK_SITES`, `WORST_SITE` |
 | Direct SQL execution | `run_query(sql)` executes generated Cortex SQL through Snowflake connector and returns dictionaries |
 | Cortex Analyst chat | Posts JWT-authenticated message payload to `/api/v2/cortex/analyst/message` and executes returned SQL blocks |
@@ -888,7 +888,7 @@ The downloaded scheduler log shows Airflow successfully parsing and syncing `ran
     "messages": [
         {"role": "user", "content": [{"type": "text", "text": question}]}
     ],
-    "semantic_model_file": "@TOWER_HEALTH_DB.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml",
+    "semantic_model_file": "@YOUR_SNOWFLAKE_DATABASE.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml",
 }
 ```
 
@@ -908,7 +908,7 @@ A separate Snowflake-exported app package was also provided:
 
 | File | Role |
 |---|---|
-| `snowflake.yml` | Defines app title `TOWER_HEALTH_NOC`, `main_file: TOWER_HEALTH_NOC.py`, `query_warehouse: COMPUTE_WH`, `compute_pool: SYSTEM_COMPUTE_POOL_CPU`, `run_mode: SpcsOnly` |
+| `snowflake.yml` | Defines app title `TOWER_HEALTH_NOC`, `main_file: TOWER_HEALTH_NOC.py`, `query_warehouse: YOUR_SNOWFLAKE_WAREHOUSE`, `compute_pool: SYSTEM_COMPUTE_POOL_CPU`, `run_mode: SpcsOnly` |
 | `TOWER_HEALTH_NOC.py` | Snowflake-native app file using active Snowflake/Snowpark session token rather than EC2 JWT |
 | `pyproject.toml` | Python `~=3.11.0`, dependency `streamlit[snowflake]` |
 | `config.toml` | Placeholder Streamlit theme config |
@@ -1043,7 +1043,7 @@ FACT_CELLS[date_key]    → DIM_DATE[date_key]
 **Context:**
 
 ```sql
-USE DATABASE TOWER_HEALTH_DB;
+USE DATABASE YOUR_SNOWFLAKE_DATABASE;
 USE SCHEMA PUBLIC;
 CREATE OR REPLACE FILE FORMAT TOWER_PARQUET_FMT TYPE = PARQUET;
 ```
@@ -1142,38 +1142,38 @@ The Airflow DAG refresh task also attempts `DIM_SECTOR` and `DIM_TECHNOLOGY`; th
 
 ```sql
 -- NOC banner
-SELECT * FROM TOWER_HEALTH_DB.PUBLIC.V_NOC_DAILY_SUMMARY LIMIT 1;
+SELECT * FROM YOUR_SNOWFLAKE_DATABASE.PUBLIC.V_NOC_DAILY_SUMMARY LIMIT 1;
 
 -- NOC native table (fast Power BI source)
-SELECT * FROM TOWER_HEALTH_DB.PUBLIC.NOC_SUMMARY_NATIVE;
+SELECT * FROM YOUR_SNOWFLAKE_DATABASE.PUBLIC.NOC_SUMMARY_NATIVE;
 
 -- Confirm all views exist
-SHOW VIEWS IN SCHEMA TOWER_HEALTH_DB.PUBLIC;
+SHOW VIEWS IN SCHEMA YOUR_SNOWFLAKE_DATABASE.PUBLIC;
 
 -- Confirm external tables exist
-SHOW EXTERNAL TABLES IN SCHEMA TOWER_HEALTH_DB.PUBLIC;
+SHOW EXTERNAL TABLES IN SCHEMA YOUR_SNOWFLAKE_DATABASE.PUBLIC;
 
 -- Cortex Analyst active semantic stage used by EC2 app
-LIST @TOWER_HEALTH_DB.PUBLIC.SEMANTIC_STAGE;
+LIST @YOUR_SNOWFLAKE_DATABASE.PUBLIC.SEMANTIC_STAGE;
 
 -- Optional upload-helper stage used by upload_yaml.py
-LIST @TOWER_HEALTH_DB.PUBLIC.SEMANTIC_MODELS;
+LIST @YOUR_SNOWFLAKE_DATABASE.PUBLIC.SEMANTIC_MODELS;
 
 -- ML predictions check
 SELECT RISK_LEVEL, COUNT(*)
-FROM TOWER_HEALTH_DB.PUBLIC.FACT_ML_PREDICTIONS
+FROM YOUR_SNOWFLAKE_DATABASE.PUBLIC.FACT_ML_PREDICTIONS
 GROUP BY 1
 ORDER BY 2 DESC;
 
 -- Prediction freshness by filename-derived date
 SELECT PREDICTION_DATE, COUNT(*)
-FROM TOWER_HEALTH_DB.PUBLIC.FACT_ML_PREDICTIONS
+FROM YOUR_SNOWFLAKE_DATABASE.PUBLIC.FACT_ML_PREDICTIONS
 GROUP BY 1
 ORDER BY 1 DESC;
 
 -- Alarm severity breakdown
 SELECT SEVERITY, COUNT(*) AS cnt
-FROM TOWER_HEALTH_DB.PUBLIC.V_ALARM
+FROM YOUR_SNOWFLAKE_DATABASE.PUBLIC.V_ALARM
 GROUP BY 1
 ORDER BY cnt DESC;
 ```

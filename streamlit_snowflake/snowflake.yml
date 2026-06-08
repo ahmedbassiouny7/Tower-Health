@@ -3,11 +3,11 @@ entities:
   streamlit_app:
     type: streamlit
     identifier:
-      database: TOWER_HEALTH_DB
+      database: YOUR_SNOWFLAKE_DATABASE
       schema: PUBLIC
       name: UNTITLED
     title: TOWER_HEALTH_NOC
-    query_warehouse: COMPUTE_WH
+    query_warehouse: YOUR_SNOWFLAKE_WAREHOUSE
     compute_pool: SYSTEM_COMPUTE_POOL_CPU
     run_mode: SpcsOnly
     execute_as: OWNER

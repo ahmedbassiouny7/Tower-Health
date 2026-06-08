@@ -1,7 +1,7 @@
 # =====================================================================
 # Tower Health — Cortex Analyst Semantic Model  (v3, reworked schema)
 # =====================================================================
-# Source: TOWER_HEALTH_DB.PUBLIC external tables over S3 Gold (Parquet/CSV).
+# Source: YOUR_SNOWFLAKE_DATABASE.PUBLIC external tables over S3 Gold (Parquet/CSV).
 # Reconciled against the post-rework column inventory (2026-06-06).
 #
 # ---------------------------------------------------------------------
@@ -67,7 +67,7 @@ tables:
 
   - name: site
     description: Physical telecom tower site. 4 sites across Egypt. Use "region" for city/governorate questions.
-    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: V_SITE}
+    base_table: {database: YOUR_SNOWFLAKE_DATABASE, schema: PUBLIC, table: V_SITE}
     primary_key: {columns: ['site_sk']}
     dimensions:
       - name: site_sk
@@ -112,7 +112,7 @@ tables:
       Logical radio cell. 12 cells (4G + 5G). Links to site via site_id.
       Carries the radio technology (4G/5G) directly — there is no separate
       technology dimension. Group by "technology" for per-generation KPIs.
-    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: V_CELL}
+    base_table: {database: YOUR_SNOWFLAKE_DATABASE, schema: PUBLIC, table: V_CELL}
     primary_key: {columns: ['cell_sk']}
     dimensions:
       - name: cell_sk
@@ -152,7 +152,7 @@ tables:
         synonyms: ["number of cells", "total cells", "how many cells", "عدد الخلايا"]
   - name: radio_unit
     description: Radio unit (RU) equipment inventory. Standalone (no clean fact join).
-    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: DIM_RU}
+    base_table: {database: YOUR_SNOWFLAKE_DATABASE, schema: PUBLIC, table: DIM_RU}
     primary_key: {columns: ['RU_sk']}
     dimensions:
       - name: ru_sk
@@ -175,7 +175,7 @@ tables:
         synonyms: ["number of radio units", "total radio units", "عدد وحدات الراديو"]
   - name: antenna
     description: Antenna equipment inventory. Standalone (no clean fact join).
-    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: DIM_ANTENNA}
+    base_table: {database: YOUR_SNOWFLAKE_DATABASE, schema: PUBLIC, table: DIM_ANTENNA}
     primary_key: {columns: ['antenna_sk']}
     dimensions:
       - name: antenna_sk
@@ -210,7 +210,7 @@ tables:
         synonyms: ["number of antennas", "total antennas", "عدد الهوائيات"]
   - name: link
     description: Backhaul transport link (Fiber / Microwave). Standalone inventory.
-    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: DIM_LINK}
+    base_table: {database: YOUR_SNOWFLAKE_DATABASE, schema: PUBLIC, table: DIM_LINK}
     primary_key: {columns: ['link_sk']}
     dimensions:
       - name: link_sk
@@ -234,7 +234,7 @@ tables:
         synonyms: ["number of links", "total links", "عدد الروابط"]
   - name: date
     description: Calendar date dimension (~730 days). PK is date_sk; "Date" is the real date.
-    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: V_DATE}
+    base_table: {database: YOUR_SNOWFLAKE_DATABASE, schema: PUBLIC, table: V_DATE}
     primary_key: {columns: ['date_sk']}
     dimensions:
       - name: date_sk
@@ -281,7 +281,7 @@ tables:
 
   - name: time_of_day
     description: Time-of-day dimension. PK is time_pk.
-    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: DIM_TIME}
+    base_table: {database: YOUR_SNOWFLAKE_DATABASE, schema: PUBLIC, table: DIM_TIME}
     primary_key: {columns: ['time_pk']}
     dimensions:
       - name: time_pk
@@ -319,7 +319,7 @@ tables:
       BLER, HARQ, and handovers. Use this for any signal/quality/
       performance question. Join to site goes through the cell dimension;
       group by cell."technology" for per-generation (4G/5G) breakdowns.
-    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: V_CELL_PERFORMANCE}
+    base_table: {database: YOUR_SNOWFLAKE_DATABASE, schema: PUBLIC, table: V_CELL_PERFORMANCE}
     dimensions:
       - name: cell_key
         expr: 'CELL_KEY'
@@ -501,7 +501,7 @@ tables:
       Wide denormalized row; RU/antenna/link instances live as columns.
       Joins to site directly via site_id, and to date/time via the
       surrogate keys.
-    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: FACT_RAN}
+    base_table: {database: YOUR_SNOWFLAKE_DATABASE, schema: PUBLIC, table: FACT_RAN}
     dimensions:
       - name: site_id
         expr: 'SITE_ID'
@@ -632,7 +632,7 @@ tables:
       category, or component_key for component-level breakdowns.
       NOTE: the equivalent join column on FACT_CELLS is named "RAN_key" —
       same value, different name. Both equal md5(site_id) = site_sk.
-    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: V_ALARM}
+    base_table: {database: YOUR_SNOWFLAKE_DATABASE, schema: PUBLIC, table: V_ALARM}
     dimensions:
       - name: site_key
         expr: 'SITE_KEY'
@@ -681,7 +681,7 @@ tables:
       to DIM_SITE via SITE_ID — unlike FACT_ALARMS, this table HAS a site
       foreign key. Use for "which towers will fail?" and risk-trend
       queries. Identifiers are UPPER-case unquoted (CSV source).
-    base_table: {database: TOWER_HEALTH_DB, schema: PUBLIC, table: FACT_ML_PREDICTIONS}
+    base_table: {database: YOUR_SNOWFLAKE_DATABASE, schema: PUBLIC, table: FACT_ML_PREDICTIONS}
     dimensions:
       - name: site_id
         expr: 'SITE_ID'

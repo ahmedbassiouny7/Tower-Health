@@ -1,4 +1,4 @@
-﻿import os
+import os
 from datetime import datetime
 
 try:
@@ -49,11 +49,11 @@ def resolve_partition(**context):
 def _refresh_snowflake(**context):
     import snowflake.connector
     conn = snowflake.connector.connect(
-        account=os.getenv("SNOWFLAKE_ACCOUNT", "rmb62104"),
-        user=os.getenv("SNOWFLAKE_USER", "towerproject"),
+        account=os.getenv("SNOWFLAKE_ACCOUNT", "YOUR_SNOWFLAKE_ACCOUNT"),
+        user=os.getenv("SNOWFLAKE_USER", "YOUR_SNOWFLAKE_USER"),
         password=require_env("SNOWFLAKE_PASSWORD"),
-        warehouse=os.getenv("SNOWFLAKE_WAREHOUSE", "COMPUTE_WH"),
-        database=os.getenv("SNOWFLAKE_DATABASE", "TOWER_HEALTH_DB"),
+        warehouse=os.getenv("SNOWFLAKE_WAREHOUSE", "YOUR_SNOWFLAKE_WAREHOUSE"),
+        database=os.getenv("SNOWFLAKE_DATABASE", "YOUR_SNOWFLAKE_DATABASE"),
         schema=os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC"),
     )
     cur = conn.cursor()

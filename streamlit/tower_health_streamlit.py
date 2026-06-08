@@ -77,10 +77,10 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-SNOWFLAKE_HOST  = "rmb62104.snowflakecomputing.com"
+SNOWFLAKE_HOST  = "YOUR_SNOWFLAKE_ACCOUNT.snowflakecomputing.com"
 SNOWFLAKE_URL   = f"https://{SNOWFLAKE_HOST}"
 CORTEX_ENDPOINT = "/api/v2/cortex/analyst/message"
-SEMANTIC_MODEL  = "@TOWER_HEALTH_DB.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml"
+SEMANTIC_MODEL  = "@YOUR_SNOWFLAKE_DATABASE.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml"
 PRIVATE_KEY_PATH = "/home/ubuntu/.streamlit/rsa_key.p8"
 
 
@@ -98,8 +98,8 @@ def make_jwt():
     fp = "SHA256:" + base64.b64encode(hashlib.sha256(pub_raw).digest()).decode()
     now = datetime.datetime.now(datetime.timezone.utc)
     token = jwt.encode({
-        "iss": f"RMB62104.TOWERPROJECT.{fp}",
-        "sub": "RMB62104.TOWERPROJECT",
+        "iss": f"YOUR_SNOWFLAKE_ACCOUNT.YOUR_SNOWFLAKE_USER.{fp}",
+        "sub": "YOUR_SNOWFLAKE_ACCOUNT.YOUR_SNOWFLAKE_USER",
         "iat": now,
         "exp": now + datetime.timedelta(minutes=55),
     }, private_key, algorithm="RS256")
@@ -198,7 +198,7 @@ def call_cortex_analyst(question):
 def load_noc_summary():
     try:
         rows = run_query(
-            "SELECT * FROM TOWER_HEALTH_DB.PUBLIC.V_NOC_DAILY_SUMMARY LIMIT 1"
+            "SELECT * FROM YOUR_SNOWFLAKE_DATABASE.PUBLIC.V_NOC_DAILY_SUMMARY LIMIT 1"
         )
         return rows[0] if rows else None
     except Exception:

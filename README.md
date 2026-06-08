@@ -205,11 +205,11 @@ Runtime assumptions from the EC2 backup:
 The Snowflake refresh task reads these environment variables:
 
 ```env
-SNOWFLAKE_ACCOUNT=rmb62104
-SNOWFLAKE_USER=towerproject
+SNOWFLAKE_ACCOUNT=YOUR_SNOWFLAKE_ACCOUNT
+SNOWFLAKE_USER=YOUR_SNOWFLAKE_USER
 SNOWFLAKE_PASSWORD=...
-SNOWFLAKE_WAREHOUSE=COMPUTE_WH
-SNOWFLAKE_DATABASE=TOWER_HEALTH_DB
+SNOWFLAKE_WAREHOUSE=YOUR_SNOWFLAKE_WAREHOUSE
+SNOWFLAKE_DATABASE=YOUR_SNOWFLAKE_DATABASE
 SNOWFLAKE_SCHEMA=PUBLIC
 ```
 
@@ -238,7 +238,7 @@ snowflake/tower_health_semantic_model.yaml
 The EC2 Streamlit app references:
 
 ```text
-@TOWER_HEALTH_DB.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml
+@YOUR_SNOWFLAKE_DATABASE.PUBLIC.SEMANTIC_STAGE/tower_health_semantic_model.yaml
 ```
 
 ## Streamlit Apps

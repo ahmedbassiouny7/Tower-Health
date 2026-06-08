@@ -15,7 +15,7 @@
 -- ---------------------------------------------------------------------
 -- 0. Context
 -- ---------------------------------------------------------------------
-USE DATABASE TOWER_HEALTH_DB;
+USE DATABASE YOUR_SNOWFLAKE_DATABASE;
 USE SCHEMA PUBLIC;
 
 -- ---------------------------------------------------------------------
@@ -227,8 +227,8 @@ SELECT COUNT(*) AS total_alarms FROM Fact_Alarms;
 
 -- THE alarm->site join. Should now return 4 towers (not empty).
 SELECT s."site_name", s."region", COUNT(*) AS critical_alarm_count
-FROM TOWER_HEALTH_DB.PUBLIC.Fact_Alarms a
-JOIN TOWER_HEALTH_DB.PUBLIC.dim_site  s
+FROM YOUR_SNOWFLAKE_DATABASE.PUBLIC.Fact_Alarms a
+JOIN YOUR_SNOWFLAKE_DATABASE.PUBLIC.dim_site  s
   ON a."site_key" = s."site_sk"
 WHERE a."severity" = 'CRITICAL'
 GROUP BY s."site_name", s."region"

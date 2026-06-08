@@ -70,9 +70,9 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-SNOWFLAKE_URL  = "https://ffospeo-rmb62104.snowflakecomputing.com"
+SNOWFLAKE_URL  = "https://YOUR_SNOWFLAKE_ACCOUNT.snowflakecomputing.com"
 CORTEX_ENDPOINT = "/api/v2/cortex/analyst/message"
-SEMANTIC_MODEL  = "@TOWER_HEALTH_DB.PUBLIC.SEMANTIC_MODELS/tower_health_semantic_model.yaml"
+SEMANTIC_MODEL  = "@YOUR_SNOWFLAKE_DATABASE.PUBLIC.SEMANTIC_MODELS/tower_health_semantic_model.yaml"
 
 
 # ── Helper functions ───────────────────────────────────────────────────────────
@@ -148,7 +148,7 @@ def load_noc_summary():
     try:
         session = snowpark_context.get_active_session()
         row = session.sql(
-            "SELECT * FROM TOWER_HEALTH_DB.PUBLIC.V_NOC_DAILY_SUMMARY LIMIT 1"
+            "SELECT * FROM YOUR_SNOWFLAKE_DATABASE.PUBLIC.V_NOC_DAILY_SUMMARY LIMIT 1"
         ).to_pandas()
         return row.iloc[0].to_dict() if not row.empty else None
     except Exception:

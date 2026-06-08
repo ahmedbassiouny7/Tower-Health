@@ -6,7 +6,7 @@ con = snowflake.connector.connect(
     account='<ACCOUNT>',     # from your Snowflake URL, e.g. abcd-xy12345
     role='<ROLE>',           # ACCOUNTADMIN or whichever owns SEMANTIC_MODELS
     warehouse='<WAREHOUSE>',
-    database='TOWER_HEALTH_DB',
+    database='YOUR_SNOWFLAKE_DATABASE',
     schema='PUBLIC',
 )
 
