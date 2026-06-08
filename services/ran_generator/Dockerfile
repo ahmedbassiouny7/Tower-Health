@@ -7,7 +7,8 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the simulator entrypoint that emits RAN telemetry to stdout, files, or Kafka.
+# Copy the simulator entrypoints.
 COPY ran_data_generator.py ./
+COPY historical_backfill.py ./
 
 CMD ["python", "ran_data_generator.py"]

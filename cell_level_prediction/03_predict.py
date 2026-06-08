@@ -32,9 +32,9 @@ A CSV with one row per (site, cell, timestamp):
 RISK LEVELS
 -----------
     LOW       P < 0.30
-    MEDIUM    0.30 ≤ P < 0.55
-    HIGH      0.55 ≤ P < 0.75
-    CRITICAL  P ≥ 0.75
+    MEDIUM    0.30 <= P < 0.55
+    HIGH      0.55 <= P < 0.75
+    CRITICAL  P >= 0.75
 
 Designed for Google Colab — all installs included.
 """
@@ -74,9 +74,29 @@ _STATUS_MAP = {
 }
 _TECH_MAP = {"2G":0,"3G":1,"4G":2,"5G":3,"NR":3}
 
-# Risk level bins
-_RISK_BINS   = [0.0, 0.30, 0.55, 0.75, 1.001]
-_RISK_LABELS = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RISK LEVEL  — deterministic string derivation from probability
+# Using np.select instead of pd.cut to avoid Categorical serialisation issues
+# and floating-point edge cases at bin boundaries.
+# ══════════════════════════════════════════════════════════════════════════════
+def _prob_to_risk(prob: np.ndarray) -> np.ndarray:
+    """
+    Map failure probabilities to risk-level strings.
+        LOW      P < 0.30
+        MEDIUM   0.30 <= P < 0.55
+        HIGH     0.55 <= P < 0.75
+        CRITICAL P >= 0.75
+    Returns a plain numpy object array of strings — no Categorical, no NaN.
+    """
+    conditions = [
+        prob < 0.30,
+        (prob >= 0.30) & (prob < 0.55),
+        (prob >= 0.55) & (prob < 0.75),
+        prob >= 0.75,
+    ]
+    choices = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    return np.select(conditions, choices, default="LOW")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -409,17 +429,14 @@ class RANCellPredictor:
     def _assemble_output(self, df: pd.DataFrame,
                           prob: np.ndarray) -> pd.DataFrame:
         out = pd.DataFrame({
-            "timestamp":           df["timestamp"],
-            "site_id":             df["site_id"],
-            "cell_id":             df["cell_id"],
-            "failure_probability": np.round(prob, 4),
-            "predicted_failure":   (prob >= self.threshold).astype(np.int8),
-            "risk_level": pd.cut(
-                prob,
-                bins=_RISK_BINS,
-                labels=_RISK_LABELS,
-                right=False
-            ),
+            "TIMESTAMP":           df["timestamp"],
+            "SITE_ID":             df["site_id"],
+            "CELL_ID":             "CELL_" + df["cell_id"].astype(str),
+            "FAILURE_PROBABILITY": np.round(prob, 4),
+            "PREDICTED_FAILURE":   (prob >= self.threshold).astype(np.int8),
+            # FIX: use np.select instead of pd.cut to guarantee plain string
+            # output with no NaN and no Categorical serialisation surprises.
+            "RISK_LEVEL":          _prob_to_risk(prob),
         })
         return out
 
@@ -430,19 +447,19 @@ class RANCellPredictor:
     @staticmethod
     def _print_summary(results: pd.DataFrame):
         total = len(results)
-        n_fail = results["predicted_failure"].sum()
+        n_fail = results["PREDICTED_FAILURE"].sum()
         print(f"\n{'─'*55}")
         print(f"  Total cell-hours scored : {total:,}")
         print(f"  Predicted failures      : {n_fail:,}  "
               f"({100*n_fail/total:.1f}%)")
         print(f"\n  By cell:")
-        for cid, grp in results.groupby("cell_id"):
-            f = grp["predicted_failure"].sum()
-            print(f"    Cell {cid}: {f:5,} / {len(grp):,}  "
+        for cid, grp in results.groupby("CELL_ID"):
+            f = grp["PREDICTED_FAILURE"].sum()
+            print(f"    {cid}: {f:5,} / {len(grp):,}  "
                   f"({100*f/len(grp):.1f}%)")
         print(f"\n  Risk breakdown:")
-        for lv in _RISK_LABELS:
-            cnt = (results["risk_level"] == lv).sum()
+        for lv in ["LOW", "MEDIUM", "HIGH", "CRITICAL"]:
+            cnt = (results["RISK_LEVEL"] == lv).sum()
             print(f"    {lv:<10s}: {cnt:7,}  ({100*cnt/total:.1f}%)")
         print(f"{'─'*55}\n")
 

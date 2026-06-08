@@ -323,6 +323,38 @@ services:
       - towerhealth
     restart: unless-stopped
 
+  ran-backfill:
+    # Historical daily RAN backfill. Writes one JSON file per day to the same
+    # raw S3 partition layout used by the S3 sink connector.
+    build:
+      context: ./services/ran_generator
+    profiles:
+      - backfill
+    container_name: ran-backfill
+    environment:
+      OUTPUT_DIR: /data/historical_ran
+      RAN_BACKFILL_START: ${RAN_BACKFILL_START:-2025-11-23}
+      RAN_BACKFILL_END: ${RAN_BACKFILL_END:-}
+      RAN_BACKFILL_STEP_MINUTES: ${RAN_BACKFILL_STEP_MINUTES:-60}
+      RAN_BACKFILL_FILES_PER_DAY: ${RAN_BACKFILL_FILES_PER_DAY:-2}
+      RAN_BACKFILL_WINDOWS: ${RAN_BACKFILL_WINDOWS:-00:00-12:00,12:15-00:00}
+      RAN_BACKFILL_UPLOAD: ${RAN_BACKFILL_UPLOAD:-true}
+      RAN_BACKFILL_OVERWRITE: ${RAN_BACKFILL_OVERWRITE:-false}
+      RAN_BACKFILL_KEEP_LOCAL: ${RAN_BACKFILL_KEEP_LOCAL:-false}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-tower-iti-project}
+      S3_PREFIX: ${S3_PREFIX:-raw-data}
+      KAFKA_TOPIC: ${RAN_KAFKA_TOPIC:-ran_telemetry}
+    volumes:
+      - ran_data:/data
+    command: ["python", "historical_backfill.py"]
+    networks:
+      - towerhealth
+    restart: "no"
+
   weather-producer:
     # WeatherAPI source. In kafka mode it writes weather snapshots to weather_events.
     build:

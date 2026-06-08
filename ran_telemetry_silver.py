@@ -400,6 +400,7 @@ else:
         col("ru.op_state"),
         col("ru.tx_power_watts"),
         col("ru.rx_signal_strength_dbm").alias("rx_signal_dbm"),
+        col("ru.current_ampere"),
         col("ru.voltage_volt"),
         col("ru.temperature_c"),
         col("ru.throughput_mbps"),

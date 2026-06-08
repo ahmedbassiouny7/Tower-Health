@@ -1,91 +1,73 @@
-
-
-import boto3
-from pyspark.sql.functions import (
-    col,
-    current_timestamp,
-    explode,
-    explode_outer,
-    input_file_name,
-    lit,
-    to_timestamp,
-    upper,
-    when
-)
-from pyspark.sql.types import (
-    ArrayType,
-    BooleanType,
-    DoubleType,
-    IntegerType,
-    LongType,
-    StringType,
-    StructField,
-    StructType,
-)
-
-# EC2 SparkSession will be created below in section 1
-
 import sys
+
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+from pyspark.sql.functions import monotonically_increasing_id
 
-# ==========================================
-# 1. INITIALIZATION & S3 PATHS CONFIGURATION
-# ==========================================
-spark = SparkSession.builder \
-    .appName("TowerHealth-Gold") \
-    .config("spark.sql.session.timeZone", "UTC") \
-    .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-    .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.3.4") \
-    .config("spark.hadoop.fs.s3a.aws.credentials.provider",
-            "com.amazonaws.auth.DefaultAWSCredentialsProviderChain") \
+# ---------------------------------------------------------------------------
+# 1. Spark setup
+# ---------------------------------------------------------------------------
+spark = (
+    SparkSession.builder
+    .appName("Telecom_RAN_Gold_Layer_Pipeline")
+    .config("spark.sql.session.timeZone", "UTC")
+    .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.3.4")
+    .config(
+        "spark.hadoop.fs.s3a.aws.credentials.provider",
+        "com.amazonaws.auth.DefaultAWSCredentialsProviderChain",
+    )
     .getOrCreate()
+)
 spark.sparkContext.setLogLevel("WARN")
 
+# ---------------------------------------------------------------------------
+# 2. Paths and IO helpers
+# ---------------------------------------------------------------------------
 S3_SILVER_BASE = "s3a://tower-iti-project/silver/ran_telemetry_normalized/"
-S3_GOLD_BASE   = "s3a://tower-iti-project/gold/ran_telemetry_bi/"
+S3_GOLD_BASE = "s3a://tower-iti-project/gold/ran_telemetry_bi/"
 
 
 def get_silver_path(table_name):
     return f"{S3_SILVER_BASE}{table_name}/"
 
+
 def write_to_gold(df, table_name, partition_cols=None):
     path = f"{S3_GOLD_BASE}{table_name}/"
     writer = df.write.mode("overwrite").format("parquet")
     if partition_cols:
-        writer.partitionBy(*partition_cols)
+        writer = writer.partitionBy(*partition_cols)
     writer.save(path)
-    print(f" Successfully written {table_name} to Gold Layer.")
+    print(f"Successfully written {table_name} to Gold Layer: {path}")
 
-# ==========================================
-# 2. LOADING SILVER TABLES
-# ==========================================
+
 print("Loading Silver Tables from S3...")
-df_site_snapshot     = spark.read.parquet(get_silver_path("site_snapshot"))
-df_cells             = spark.read.parquet(get_silver_path("cells"))
-df_antennas          = spark.read.parquet(get_silver_path("antennas"))
-df_radio_units       = spark.read.parquet(get_silver_path("radio_units"))
-df_baseband_units    = spark.read.parquet(get_silver_path("baseband_units"))
-df_transport_links   = spark.read.parquet(get_silver_path("transport_links"))
-df_alerts            = spark.read.parquet(get_silver_path("alerts"))
-df_batteries  = spark.read.parquet(get_silver_path("batteries"))
+df_site_snapshot = spark.read.parquet(get_silver_path("site_snapshot"))
+df_cells = spark.read.parquet(get_silver_path("cells"))
+df_antennas = spark.read.parquet(get_silver_path("antennas"))
+df_radio_units = spark.read.parquet(get_silver_path("radio_units"))
+df_baseband_units = spark.read.parquet(get_silver_path("baseband_units"))
+df_transport_links = spark.read.parquet(get_silver_path("transport_links"))
+df_alerts = spark.read.parquet(get_silver_path("alerts"))
+df_batteries = spark.read.parquet(get_silver_path("batteries"))
 df_rectifiers = spark.read.parquet(get_silver_path("rectifiers"))
 df_environment_sensors = spark.read.parquet(get_silver_path("environment_sensors"))
 
-# ==========================================
-# 3. HELPER FUNCTIONS FOR AGGREGATION & WINDOWING
-# ==========================================
+
 def add_time_buckets(df):
-    return df \
-        .withColumn("window_bucket", F.window(F.col("snapshot_time"), "15 minutes")) \
-        .withColumn("gold_snapshot_time", F.col("window_bucket.start")) \
+    return (
+        df.withColumn("window_bucket", F.window(F.col("snapshot_time"), "15 minutes"))
+        .withColumn("gold_snapshot_time", F.col("window_bucket.start"))
         .withColumn("gold_date", F.to_date(F.col("gold_snapshot_time")))
+    )
+
 
 def get_last_status_window(partition_keys):
-    return Window.partitionBy(*partition_keys, "gold_snapshot_time").orderBy(F.col("sequence_number").desc())
-
-# --- Dim Sit ---
+    return Window.partitionBy(*partition_keys, "gold_snapshot_time").orderBy(
+        F.col("sequence_number").desc()
+    )
+# --- Dim Site ---
 df_dim_site = df_site_snapshot.select(
     "site_id", 
     "site_name", 
@@ -110,10 +92,8 @@ df_dim_site.show(truncate=False)
 write_to_gold(df_dim_site, "dim_site")
 
 # ---  DIM_CELL ---
-
 df_dim_cell = df_cells.select(
     "cell_id",
-    "sector_id",
     "site_id",
     "technology",
     "bandwidth_mhz", 
@@ -123,7 +103,6 @@ df_dim_cell = df_cells.select(
     .select(
         "cell_sk", 
         "cell_id",
-        "sector_id",
         "site_id",
         "technology",
         "bandwidth_mhz", 
@@ -135,38 +114,6 @@ df_dim_cell.show(truncate=False)
 
 
 write_to_gold(df_dim_cell, "dim_cell")
-
-# --- Dim Sector ---
-df_dim_sector = df_antennas.select(
-    "sector_id",
-    "azimuth_degree", 
-    "tilt_degree"
-).distinct() \
-    .withColumn("sector_sk", F.md5(F.col("sector_id"))) \
-    .select(
-        "sector_sk", 
-        "sector_id",
-        "azimuth_degree", 
-        "tilt_degree"
-    )
-
-print("✅ dim_sector updated successfully and matches the data diagram.")
-print("--- [SHOWING DATA] dim_sector Output Sample ---")
-df_dim_sector.show(truncate=False)
-
-write_to_gold(df_dim_sector, "dim_sector")
-
-
-
-
-# --- Dim Technology ---
-df_dim_technology = df_cells.select(F.col("technology").alias("technology_name")).distinct() \
-    .withColumn("technology_sk", F.md5(F.col("technology_name"))) \
-    .select("technology_sk", "technology_name")
-
-df_dim_technology.show(truncate=False)
-
-write_to_gold(df_dim_technology, "dim_technology")
 
 # --- Dim Date ---
 # Generate a full date range independent of silver data
@@ -203,35 +150,49 @@ print(f"dim_date total rows: {df_dim_date.count():,}")
 write_to_gold(df_dim_date, "dim_date")
 
 # --- Dim Time ---
-# Generate all 96 fixed 15-minute slots of the day (00:00 → 23:45)
-df_dim_time = spark.sql("""
+
+# Generate full day at 30-second intervals
+df_dim_datetime = spark.sql("""
     SELECT explode(sequence(
         to_timestamp('1970-01-01 00:00:00'),
-        to_timestamp('1970-01-01 23:45:00'),
-        interval 15 minutes
+        to_timestamp('1970-01-01 23:59:30'),
+        interval 30 seconds
     )) AS ts
 """)
 
-df_dim_time = df_dim_time.select(
-    F.date_format("ts", "HHmm").cast("int").alias("time_pk"),
-    F.date_format("ts", "HH:mm").alias("time_label"),
-    F.hour("ts").alias("Hour"),
-    F.minute("ts").alias("Minute"),
-    F.floor(F.hour("ts") / 6).cast("int").alias("day_part_num"),   # 0-3
-    F.when(F.hour("ts") < 6,  "Night")
+df_dim_datetime = df_dim_datetime.select(
+    # Primary Key (unique per 30 sec slot)
+    F.date_format("ts", "HHmmss").cast("int").alias("datetime_sk"),
+
+    # Full timestamp label
+    F.date_format("ts", "HH:mm:ss").alias("time_label"),
+
+    # Components
+    F.hour("ts").alias("hour"),
+    F.minute("ts").alias("minute"),
+    F.second("ts").alias("second"),
+
+    # Day segmentation
+    F.when(F.hour("ts") < 6, "Night")
      .when(F.hour("ts") < 12, "Morning")
      .when(F.hour("ts") < 18, "Afternoon")
-     .otherwise("Evening").alias("DayPart"),
-    F.when(
-        (F.hour("ts") >= 8) & (F.hour("ts") < 18), "Business Hours"
-    ).otherwise("Off Hours").alias("BusinessHours"),
-).dropDuplicates(["time_pk"])
+     .otherwise("Evening").alias("day_part"),
 
-print("--- [SHOWING DATA] dim_time Output Sample ---")
-df_dim_time.show(10, truncate=False)
-print(f"dim_time total rows: {df_dim_time.count():,}")  # should be exactly 96
+    # Business hours flag
+    F.when((F.hour("ts") >= 8) & (F.hour("ts") < 18),
+           "Business Hours").otherwise("Off Hours").alias("business_hours"),
 
-write_to_gold(df_dim_time, "dim_time")
+    # Optional useful buckets (VERY important for BI)
+    (F.hour("ts") * 120 + F.minute("ts") * 2 + (F.second("ts") / 30)).cast("int").alias("slot_30s_index")
+).dropDuplicates(["datetime_sk"])
+
+print("--- [SHOWING DATA] dim_datetime sample ---")
+df_dim_datetime.show(10, truncate=False)
+
+print(f"dim_datetime total rows: {df_dim_datetime.count():,}")
+# should be 2880 rows (24h * 60min * 2)
+
+write_to_gold(df_dim_datetime, "dim_time")
 
 # --- Dim RU (Radio Units) ---
 df_dim_ru = df_radio_units.select(
@@ -307,13 +268,6 @@ print("="*50)
 
 from pyspark.sql import Window
 
-# ── Load silver tables not yet read in this notebook ──────────
-SILVER_BASE = "s3a://tower-iti-project/silver/ran_telemetry_normalized"
-df_batteries           = spark.read.parquet(f"{SILVER_BASE}/batteries/")
-df_rectifiers          = spark.read.parquet(f"{SILVER_BASE}/rectifiers/")
-df_environment_sensors = spark.read.parquet(f"{SILVER_BASE}/environment_sensors/")
-
-# ── helper: compute mode for a uniquely-named column ─────────
 def mode_of(df, group_cols, col_name):
     """
     Returns df with a new column  mode_{col_name}  = most frequent value
@@ -334,12 +288,10 @@ def mode_of(df, group_cols, col_name):
 
 SITE_WIN = ["site_id", "gold_snapshot_time"]
 
-# ════════════════════════════════════════════
 # 1. RADIO UNITS
 # silver cols: ru_id, sector_id, status, op_state,
 #              tx_power_watts, rx_signal_dbm, voltage_volt,
 #              temperature_c, throughput_mbps, packet_error_rate, vswr
-# ════════════════════════════════════════════
 df_ru = (
     add_time_buckets(df_radio_units)
     .withColumnRenamed("status",   "ru_status")
@@ -363,7 +315,7 @@ for slot in [1, 2, 3]:
         F.round(F.avg(F.when(F.col("ru_slot") == slot, F.col("tx_power_watts")   )), 2).alias(f"RU{s}_tx_power_watts"),
         F.round(F.avg(F.when(F.col("ru_slot") == slot, F.col("rx_signal_dbm")    )), 2).alias(f"RU{s}_rx_signal_strength_dbm"),
         F.round(F.avg(F.when(F.col("ru_slot") == slot, F.col("vswr")             )), 2).alias(f"RU{s}_vswr"),
-        F.round(F.avg(F.when(F.col("ru_slot") == slot, F.col("voltage_volt")     )), 2).alias(f"RU{s}_current_ampere"),
+        F.round(F.avg(F.when(F.col("ru_slot") == slot, F.col("current_ampere")     )), 2).alias(f"RU{s}_current_ampere"),
         F.round(F.avg(F.when(F.col("ru_slot") == slot, F.col("voltage_volt")     )), 2).alias(f"RU{s}_voltage_volt"),
         F.round(F.avg(F.when(F.col("ru_slot") == slot, F.col("packet_error_rate"))), 4).alias(f"RU{s}_packet_error_rate"),
         F.round(F.avg(F.when(F.col("ru_slot") == slot, F.col("throughput_mbps")  )), 2).alias(f"RU{s}_throughput_mbps"),
@@ -375,12 +327,10 @@ df_ru_agg = (
     .agg(*ru_exprs)
 )
 
-# ════════════════════════════════════════════
 # 2. BASEBAND UNITS
 # silver cols: bbu_id, status, op_state, active_users,
 #              cpu_pct, memory_pct, disk_pct,
 #              control_latency_ms, user_latency_ms, process_latency_ms
-# ════════════════════════════════════════════
 df_bbu = (
     add_time_buckets(df_baseband_units)
     .withColumnRenamed("status",   "bbu_status")
@@ -405,11 +355,9 @@ df_bbu_agg = (
     )
 )
 
-# ════════════════════════════════════════════
 # 3. ANTENNAS
 # silver cols: antenna_id, sector_id, status, op_state,
 #              mimo_layers, azimuth_degree, tilt_degree, rssi_dbm, snr_db
-# ════════════════════════════════════════════
 df_ant = (
     add_time_buckets(df_antennas)
     .withColumnRenamed("status",   "ant_status")
@@ -429,8 +377,8 @@ for slot in [1, 2, 3]:
         F.max(F.when(F.col("ant_slot") == slot, F.col("sector_id")           )).alias(f"antenna{s}_sector_key"),
         F.max(F.when(F.col("ant_slot") == slot, F.col("mode_ant_status")     )).alias(f"antenna{s}_status"),
         F.max(F.when(F.col("ant_slot") == slot, F.col("mode_ant_op_state")   )).alias(f"antenna{s}_opState"),
-        F.round(F.avg(F.when(F.col("ant_slot") == slot, F.col("tilt_degree")   )), 2).alias(f"antenna{s}_tilt_degree"),
-        F.round(F.avg(F.when(F.col("ant_slot") == slot, F.col("azimuth_degree"))), 2).alias(f"antenna{s}_azimuth_degree"),
+        # F.round(F.avg(F.when(F.col("ant_slot") == slot, F.col("tilt_degree")   )), 2).alias(f"antenna{s}_tilt_degree"),
+        # F.round(F.avg(F.when(F.col("ant_slot") == slot, F.col("azimuth_degree"))), 2).alias(f"antenna{s}_azimuth_degree"),
         F.round(F.avg(F.when(F.col("ant_slot") == slot, F.col("rssi_dbm")      )), 2).alias(f"antenna{s}_rssi_dbm"),
         F.round(F.avg(F.when(F.col("ant_slot") == slot, F.col("snr_db")        )), 2).alias(f"antenna{s}_snr_db"),
     ]
@@ -441,12 +389,10 @@ df_ant_agg = (
     .agg(*ant_exprs)
 )
 
-# ════════════════════════════════════════════
 # 4. TRANSPORT LINKS
 # silver cols: link_id, link_type, status, op_state,
 #              throughput_mbps, utilization_percent,
 #              latency_ms, jitter_ms, packet_loss_percent
-# ════════════════════════════════════════════
 df_lnk = (
     add_time_buckets(df_transport_links)
     .withColumnRenamed("status",   "lnk_status")
@@ -478,10 +424,8 @@ df_lnk_agg = (
     .agg(*lnk_exprs)
 )
 
-# ════════════════════════════════════════════
 # 5. BATTERIES
 # silver cols: battery_id, status, op_state, charge_pct, temperature_c
-# ════════════════════════════════════════════
 df_bat = (
     add_time_buckets(df_batteries)
     .withColumnRenamed("status",   "bat_status")
@@ -510,11 +454,9 @@ df_bat_agg = (
     .agg(*bat_exprs)
 )
 
-# ════════════════════════════════════════════
 # 6. RECTIFIERS
 # silver cols: rectifier_id, status, op_state,
 #              current_ampere, output_voltage_volt
-# ════════════════════════════════════════════
 df_rect = (
     add_time_buckets(df_rectifiers)
     .withColumnRenamed("status",   "rect_status")
@@ -541,12 +483,10 @@ df_rect_agg = (
     .agg(*rect_exprs)
 )
 
-# ════════════════════════════════════════════
 # 7. SITE SNAPSHOT
-# silver cols: env_status, env_op_state (already prefixed — no rename needed)
+# silver cols: env_status, env_op_state (already prefixed - no rename needed)
 #              gen_status, fuel_level_pct, runtime_hours,
 #              door_status, smoke_detected
-# ════════════════════════════════════════════
 df_site = add_time_buckets(df_site_snapshot)
 df_site = mode_of(df_site, SITE_WIN, "env_status")
 df_site = mode_of(df_site, SITE_WIN, "env_op_state")
@@ -555,23 +495,24 @@ df_site_agg = (
     df_site
     .groupBy("site_id", "gold_snapshot_time", "gold_date")
     .agg(
-        F.first("message_id"         ).alias("RAN_msg_Sk"),
-        F.max("mode_env_status"      ).alias("env_status"),
-        F.max("mode_env_op_state"    ).alias("env_opState"),
-        F.max("gen_status"           ).alias("generator_status"),
+        F.max("mode_env_status").alias("env_status"),
+        F.max("mode_env_op_state").alias("env_opState"),
+        F.max("gen_status").alias("generator_status"),
         F.round(F.avg("fuel_level_pct"), 2).alias("gen_fuel_level_percent"),
-        F.round(F.avg("runtime_hours"),  2).alias("gen_runtime_hours"),
-        F.max("door_status"          ).alias("door_status"),
-        F.max("smoke_detected"       ).alias("smoke_detected"),
+        F.round(F.avg("runtime_hours"), 2).alias("gen_runtime_hours"),
+        F.max("door_status").alias("door_status"),
+        F.max("smoke_detected").alias("smoke_detected")
+    )
+    .withColumn(
+        "RAN_sk",
+        F.md5(F.concat_ws("|", F.col("site_id"), F.col("gold_snapshot_time").cast("string")))
     )
 )
 
-# ════════════════════════════════════════════
 # 8. ENVIRONMENT SENSORS
 # silver cols: sensor_type, sensor_id, value, unit, status
-# temperature → pivot slot 1 & 2
-# humidity    → single average
-# ════════════════════════════════════════════
+# temperature - pivot slot 1 & 2
+# humidity - single average
 df_env = (
     add_time_buckets(df_environment_sensors)
     .withColumnRenamed("status", "sensor_status")
@@ -601,9 +542,7 @@ df_hum_agg = (
     )
 )
 
-# ════════════════════════════════════════════
 # 9. JOIN ALL SOURCES & FINAL SELECT
-# ════════════════════════════════════════════
 df_fact_ran = (
     df_site_agg
     .join(df_ru_agg,   ["site_id", "gold_snapshot_time", "gold_date"], "left")
@@ -618,37 +557,29 @@ df_fact_ran = (
         F.date_format("gold_snapshot_time", "yyyyMMdd").cast("int"))
     .withColumn("time_key",
         F.date_format("gold_snapshot_time", "HHmm").cast("int"))
-    .withColumn("RAN_key",
-        F.md5(F.concat_ws("|", F.col("site_id"),
-                          F.col("gold_snapshot_time").cast("string"))))
     .withColumn("power_status",
         F.coalesce(F.col("rect1_status"), F.col("rect2_status")))
     .withColumnRenamed("gold_snapshot_time", "timestamp")
     .select(
-        # ── Keys ──────────────────────────────────────────────
-        "RAN_msg_Sk", "date_key", "timestamp", "time_key", "RAN_key",
-        # ── RU1 ───────────────────────────────────────────────
+        "RAN_sk", "date_key", "timestamp", "time_key", "site_id",
         "RU1_Sk", "RU1_sector_key",
         "RU1_status", "RU1_op_state",
         "RU1_temperature_c", "RU1_tx_power_watts",
         "RU1_rx_signal_strength_dbm", "RU1_vswr",
         "RU1_current_ampere", "RU1_voltage_volt",
         "RU1_packet_error_rate", "RU1_throughput_mbps",
-        # ── RU2 ───────────────────────────────────────────────
         "RU2_Sk", "RU2_sector_key",
         "RU2_status", "RU2_op_state",
         "RU2_temperature_c", "RU2_tx_power_watts",
         "RU2_rx_signal_strength_dbm", "RU2_vswr",
         "RU2_current_ampere", "RU2_voltage_volt",
         "RU2_packet_error_rate", "RU2_throughput_mbps",
-        # ── RU3 ───────────────────────────────────────────────
         "RU3_Sk", "RU3_sector_key",
         "RU3_status", "RU3_op_state",
         "RU3_temperature_c", "RU3_tx_power_watts",
         "RU3_rx_signal_strength_dbm", "RU3_vswr",
         "RU3_current_ampere", "RU3_voltage_volt",
         "RU3_packet_error_rate", "RU3_throughput_mbps",
-        # ── BBU ───────────────────────────────────────────────
         "BBU_Sk", "BBU_status", "BBU_op_state",
         "BBU_cpu_utilization_percent",
         "BBU_memory_utilization_percent",
@@ -656,54 +587,38 @@ df_fact_ran = (
         "BBU_process_latency_ms",
         "BBU_active_users",
         "BBU_control_plane_latency_ms",
-        # ── Antenna 1 ─────────────────────────────────────────
         "antenna1_Sk", "antenna1_sector_key",
-        "antenna1_tilt_degree", "antenna1_azimuth_degree",
         "antenna1_status", "antenna1_opState",
         "antenna1_rssi_dbm", "antenna1_snr_db",
-        # ── Antenna 2 ─────────────────────────────────────────
         "antenna2_Sk", "antenna2_sector_key",
-        "antenna2_tilt_degree", "antenna2_azimuth_degree",
         "antenna2_status", "antenna2_opState",
         "antenna2_rssi_dbm", "antenna2_snr_db",
-        # ── Antenna 3 ─────────────────────────────────────────
         "antenna3_Sk", "antenna3_sector_key",
-        "antenna3_tilt_degree", "antenna3_azimuth_degree",
         "antenna3_status", "antenna3_opState",
         "antenna3_rssi_dbm", "antenna3_snr_db",
-        # ── Link 1 ────────────────────────────────────────────
         "link1_Sk", "link1_status", "link1_opState",
         "link1_latency_ms", "link1_jitter_ms",
         "link1_packet_loss_percent",
         "link1_throughput_mbps", "link1_utilization_percent",
-        # ── Link 2 ────────────────────────────────────────────
         "link2_Sk", "link2_status", "link2_opState",
         "link2_latency_ms", "link2_jitter_ms",
         "link2_packet_loss_percent",
         "link2_throughput_mbps", "link2_utilization_percent",
-        # ── Power / Rectifiers ────────────────────────────────
         "power_status",
         "rect1_sk", "rect1_status",
         "rect1_output_voltage_volt", "rect1_current_ampere",
         "rect2_sk", "rect2_status",
         "rect2_output_voltage_volt", "rect2_current_ampere",
-        # ── Batteries ─────────────────────────────────────────
         "battery1_sk", "battery1_status", "battery1_opState",
         "battery1_charge_percent", "battery1_temperature_c",
         "battery2_sk", "battery2_status", "battery2_opState",
         "battery2_charge_percent", "battery2_temperature_c",
-        # ── Generator ─────────────────────────────────────────
         "generator_status", "gen_fuel_level_percent", "gen_runtime_hours",
-        # ── Environment ───────────────────────────────────────
         "env_status", "env_opState",
-        # ── Temperature Sensors ───────────────────────────────
         "temp_sensor1_Sk", "temp_sensor1_value_c",
         "temp_sensor2_Sk", "temp_sensor2_value_c",
-        # ── Humidity Sensor ───────────────────────────────────
         "Humd_sensor_value_percent",
-        # ── Site ──────────────────────────────────────────────
         "door_status", "smoke_detected",
-        # ── Partition col ─────────────────────────────────────
         "gold_date",
     )
 )
@@ -714,6 +629,8 @@ print(f"Fact_RAN row count : {df_fact_ran.count():,}")
 print(f"Fact_RAN col count : {len(df_fact_ran.columns)}")
 
 write_to_gold(df_fact_ran, "Fact_RAN", partition_cols=["gold_date"])
+
+
 
 # ==========================================
 # 5b. FACT_CELLS (COMPATIBLE MODE LOGIC & ROUNDING)
@@ -788,14 +705,12 @@ df_fact_cells = df_cell_modes_final \
             ).otherwise(F.lit(None)), 2
         )) \
     .withColumn("cell_key", F.md5(F.concat_ws("|", F.col("site_id"), F.col("cell_id")))) \
-    .withColumn("Sector_key", F.md5(F.col("sector_id"))) \
-    .withColumn("technology_sk", F.md5(F.col("technology"))) \
+    .withColumnRenamed("sector_id", "sector_bk")\
     .withColumn("RAN_key", F.md5(F.col("site_id"))) \
     .withColumnRenamed("gold_snapshot_time", "timestamp") \
     .select(
         "RAN_msg_Sk", "date_key", "timestamp", "time_key", "gold_date",
-        "cell_key", "RAN_key", "Sector_key", "technology_sk",
-        "active_users", "connected_users", "peak_users", "prb_utilization_percent",
+        "cell_key", "RAN_key", "sector_bk", "active_users", "connected_users", "peak_users", "prb_utilization_percent",
         "throughput_downlink_mbps", "throughput_uplink_mbps",
         "rsrp_dbm", "rsrq_db", "sinr_db", "cqi_avg",
         "spectral_efficiency_bps_per_hz", "bler_downlink_percent", "bler_uplink_percent",
@@ -815,9 +730,10 @@ write_to_gold(df_fact_cells, "Fact_Cells", partition_cols=["gold_date"])
 
 # ==========================================
 # 5c. FACT_ALARMS
-# One row per alert event — no aggregation.
+# One row per alert event - no aggregation.
 # explode_outer in silver already ensures one row per alert.
 # ==========================================
+from pyspark.sql.functions import monotonically_increasing_id
 
 df_fact_alarms = df_alerts \
     .filter(F.col("alert_id").isNotNull()) \
@@ -826,10 +742,10 @@ df_fact_alarms = df_alerts \
     .withColumn("time_key",
         F.date_format("snapshot_time", "HHmm").cast("int")) \
     .withColumn("gold_date", F.to_date("snapshot_time")) \
-    .withColumn("RAN_key", F.md5(F.col("site_id")))\
+    .withColumn("RAN_key", F.md5(F.col("site_id"))) \
     .select(
-        F.col("message_id").alias("RAN_msg_sk"),
-        "RAN_key",
+        F.col("message_id"),
+        F.col("RAN_key").alias("site_key"),
         "date_key",
         "time_key",
         F.col("category").alias("alarm_category"),
@@ -838,18 +754,14 @@ df_fact_alarms = df_alerts \
         F.col("message").alias("alarm_msg"),
         "snapshot_time",
         "gold_date",
-    )
-
+    ) \
+    .withColumn("alarm_sk", monotonically_increasing_id())
 print("--- [SHOWING DATA] Fact_Alarms Output Sample ---")
 df_fact_alarms.show(10, truncate=False)
 print(f"Fact_Alarms row count: {df_fact_alarms.count():,}")
 
 write_to_gold(df_fact_alarms, "Fact_Alarms", partition_cols=["gold_date"])
 
-
-
-
-
-
-
+print("Gold layer job complete.")
+spark.stop()
 
