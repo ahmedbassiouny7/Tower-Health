@@ -1,39 +1,56 @@
 # Tower Health
 
+![Python](https://img.shields.io/badge/Python-3.11%2F3.12-3776AB?logo=python&logoColor=white)
+![Apache Spark](https://img.shields.io/badge/Apache%20Spark-3.5.1-E25A1C?logo=apachespark&logoColor=white)
+![Apache Airflow](https://img.shields.io/badge/Apache%20Airflow-Orchestration-017CEE?logo=apacheairflow&logoColor=white)
+![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-3%20Brokers-231F20?logo=apachekafka&logoColor=white)
+![Snowflake](https://img.shields.io/badge/Snowflake-Cortex%20Analyst-29B5E8?logo=snowflake&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-NOC%20Chat-FF4B4B?logo=streamlit&logoColor=white)
+![Power BI](https://img.shields.io/badge/Power%20BI-Dashboard-F2C811?logo=powerbi&logoColor=black)
+
 Tower Health is an end-to-end telecom data engineering project for monitoring RAN tower health, alarms, radio KPIs, and predicted failure risk.
 
 The repository includes the local streaming prototype, EC2 PySpark batch jobs, Airflow orchestration, Snowflake external-table setup, Cortex Analyst semantic model, LightGBM inference, and Streamlit NOC chat apps.
 
 ## Architecture
 
-```text
-Synthetic RAN generator
-        |
-        v
-Kafka / S3 raw landing
-s3a://tower-iti-project/raw-data/ran_telemetry/
-        |
-        v
-PySpark Silver
-s3a://tower-iti-project/silver/ran_telemetry_normalized/
-        |
-        v
-PySpark Gold
-s3a://tower-iti-project/gold/ran_telemetry_bi/
-        |
-        +--> ML prep
-        |    s3a://tower-iti-project/gold/ran_ml_input/
-        |
-        +--> LightGBM prediction
-             s3://tower-iti-project/gold/ran_ml_predictions/
-        |
-        v
-Snowflake external tables + Cortex Analyst semantic model
-        |
-        +--> Power BI dashboard
-        +--> EC2 Streamlit NOC chat app
-        +--> Snowflake Streamlit app package
+```mermaid
+flowchart TD
+    generator["RAN Generator<br/>Synthetic tower telemetry"]
+    kafka["Kafka Cluster<br/>3 brokers, RF=3, min ISR=2"]
+    raw["S3 Raw Landing<br/>raw-data/ran_telemetry"]
+    silver["PySpark Silver<br/>10 normalized Parquet tables"]
+    gold["PySpark Gold<br/>7 dimensions + 3 BI facts"]
+    mlprep["ML Prep<br/>wide hourly feature rows"]
+    lgbm["LightGBM Inference<br/>failure probability + risk level"]
+    snowflake["Snowflake External Tables<br/>Cortex semantic model"]
+    powerbi["Power BI<br/>NOC dashboard"]
+    ec2chat["EC2 Streamlit<br/>JWT Cortex chat"]
+    snowchat["Snowflake Streamlit<br/>TOWER_HEALTH_NOC"]
+
+    generator --> kafka
+    kafka --> raw
+    raw --> silver
+    silver --> gold
+    silver --> mlprep
+    mlprep --> lgbm
+    gold --> snowflake
+    lgbm --> snowflake
+    snowflake --> powerbi
+    snowflake --> ec2chat
+    snowflake --> snowchat
 ```
+
+## Project Modules
+
+| Module | Icon | Description |
+|---|---|---|
+| Streaming | ![Kafka](https://img.shields.io/badge/Kafka-231F20?logo=apachekafka&logoColor=white) | Local Kafka-based telemetry ingestion with three brokers |
+| Processing | ![Spark](https://img.shields.io/badge/Spark-E25A1C?logo=apachespark&logoColor=white) | Silver normalization and Gold dimensional modeling |
+| Orchestration | ![Airflow](https://img.shields.io/badge/Airflow-017CEE?logo=apacheairflow&logoColor=white) | EC2 DAG for Silver, Gold, ML, and Snowflake refresh |
+| Warehouse | ![Snowflake](https://img.shields.io/badge/Snowflake-29B5E8?logo=snowflake&logoColor=white) | External tables, semantic model, Cortex Analyst |
+| AI Chat | ![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?logo=streamlit&logoColor=white) | Bilingual NOC assistant for natural-language KPI questions |
+| BI | ![Power BI](https://img.shields.io/badge/Power%20BI-F2C811?logo=powerbi&logoColor=black) | Dashboard for operations, alarms, reliability, and capacity |
 
 ## Repository Structure
 
