@@ -59,7 +59,7 @@ Copy-Item .env.example .env
 Start the local Kafka/Postgres/Spark/Streamlit stack:
 
 ```powershell
-docker compose up -d
+docker compose up -d --remove-orphans
 ```
 
 Useful local URLs:
@@ -70,6 +70,40 @@ Useful local URLs:
 | Spark master UI | `http://localhost:8084` |
 | Local Streamlit dashboard | `http://localhost:8501` |
 | Kafka Connect REST API | `http://localhost:8083` |
+
+### Kafka Fault Tolerance
+
+The local Kafka stack runs three KRaft brokers:
+
+| Broker | Internal address | Host address |
+|---|---|---|
+| `broker-1` | `broker-1:29092` | `localhost:9092` |
+| `broker-2` | `broker-2:29092` | `localhost:9093` |
+| `broker-3` | `broker-3:29092` | `localhost:9094` |
+
+Applications inside Docker use:
+
+```text
+broker-1:29092,broker-2:29092,broker-3:29092
+```
+
+Applications running on the host can use:
+
+```text
+localhost:9092,localhost:9093,localhost:9094
+```
+
+Kafka defaults in `docker-compose.yml`:
+
+| Setting | Value | Meaning |
+|---|---:|---|
+| `KAFKA_DEFAULT_REPLICATION_FACTOR` | `3` | New auto-created topics are copied to all three brokers |
+| `KAFKA_MIN_INSYNC_REPLICAS` | `2` | At least two replicas must acknowledge protected writes |
+| `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR` | `3` | Consumer group offsets survive one broker outage |
+| `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR` | `3` | Transaction metadata survives one broker outage |
+| `KAFKA_TRANSACTION_STATE_LOG_MIN_ISR` | `2` | Transaction metadata requires two in-sync replicas |
+
+In simple terms: a broker is a Kafka server, and a replica is a copy of topic data stored on another broker. With three brokers and replication factor 3, each topic partition can have three copies. With minimum in-sync replicas set to 2, the cluster can keep working if one broker goes down.
 
 Verify Postgres streaming output:
 

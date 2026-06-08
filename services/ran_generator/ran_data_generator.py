@@ -45,7 +45,10 @@ from faker import Faker
 INTERVAL_SECONDS        = int(os.getenv("RAN_INTERVAL_SECONDS", "30"))
 OUTPUT_MODE             = os.getenv("OUTPUT_MODE", "stdout")
 OUTPUT_DIR              = os.getenv("OUTPUT_DIR", "/data")
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-broker-1:9092")
+KAFKA_BOOTSTRAP_SERVERS = os.getenv(
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "broker-1:29092,broker-2:29092,broker-3:29092",
+)
 KAFKA_TOPIC             = os.getenv("KAFKA_TOPIC", "ran_telemetry")
 KAFKA_RETRY_SECONDS     = 5
 NUM_SITES               = 4
@@ -854,13 +857,19 @@ def create_kafka_producer():
     """Create a KafkaProducer, retrying until the broker is available."""
     from kafka import KafkaProducer          # type: ignore
     from kafka.errors import NoBrokersAvailable  # type: ignore
+    bootstrap_servers = [
+        server.strip()
+        for server in KAFKA_BOOTSTRAP_SERVERS.split(",")
+        if server.strip()
+    ]
 
     while True:
         try:
             return KafkaProducer(
-                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                bootstrap_servers=bootstrap_servers,
                 value_serializer=lambda v: json.dumps(v).encode("utf-8"),
                 key_serializer=lambda v: v.encode("utf-8"),
+                acks="all",
                 retries=5,
                 linger_ms=100,
             )

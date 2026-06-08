@@ -1,28 +1,90 @@
 services:
-  # Single-node Kafka broker used by all local producers and consumers.
-  # Producers write JSON events here; Spark and Kafka Connect read from it.
-  broker:
+  # Three-broker Kafka KRaft cluster for local fault-tolerance testing.
+  # Replication factor is 3 and min in-sync replicas is 2, so the cluster can
+  # tolerate one broker outage while still protecting acknowledged writes.
+  broker-1:
     image: confluentinc/cp-kafka:7.6.1
-    hostname: broker
-    container_name: broker
+    hostname: broker-1
+    container_name: broker-1
     ports:
       - "9092:9092"
-      - "9101:9101"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:29093
-      KAFKA_LISTENERS: PLAINTEXT://broker:29092,CONTROLLER://broker:29093,PLAINTEXT_HOST://0.0.0.0:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker-1:29093,2@broker-2:29093,3@broker-3:29093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker-1:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - kafka1_data:/tmp/kraft-combined-logs
+    networks:
+      - towerhealth
+    restart: unless-stopped
+
+  broker-2:
+    image: confluentinc/cp-kafka:7.6.1
+    hostname: broker-2
+    container_name: broker-2
+    ports:
+      - "9093:9093"
+    environment:
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker-1:29093,2@broker-2:29093,3@broker-3:29093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker-2:29092,PLAINTEXT_HOST://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - kafka2_data:/tmp/kraft-combined-logs
+    networks:
+      - towerhealth
+    restart: unless-stopped
+
+  broker-3:
+    image: confluentinc/cp-kafka:7.6.1
+    hostname: broker-3
+    container_name: broker-3
+    ports:
+      - "9094:9094"
+    environment:
+      KAFKA_NODE_ID: 3
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker-1:29093,2@broker-2:29093,3@broker-3:29093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker-3:29092,PLAINTEXT_HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - kafka3_data:/tmp/kraft-combined-logs
     networks:
       - towerhealth
     restart: unless-stopped
@@ -34,12 +96,14 @@ services:
   #   hostname: schema-registry
   #   container_name: schema-registry
   #   depends_on:
-  #     - broker
+  #     - broker-1
+  #     - broker-2
+  #     - broker-3
   #   ports:
   #     - "8082:8081"
   #   environment:
   #     SCHEMA_REGISTRY_HOST_NAME: schema-registry
-  #     SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: broker:29092
+  #     SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: broker-1:29092,broker-2:29092,broker-3:29092
   #     SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
   #   networks:
   #     - towerhealth
@@ -52,7 +116,9 @@ services:
   #   hostname: connect
   #   container_name: connect
   #   depends_on:
-  #     - broker
+  #     - broker-1
+  #     - broker-2
+  #     - broker-3
   #   ports:
   #     - "8083:8083"
   #   command:
@@ -62,7 +128,7 @@ services:
   #       confluent-hub install --no-prompt confluentinc/kafka-connect-s3:latest
   #       /etc/confluent/docker/run
   #   environment:
-  #     CONNECT_BOOTSTRAP_SERVERS: broker:29092
+  #     CONNECT_BOOTSTRAP_SERVERS: broker-1:29092,broker-2:29092,broker-3:29092
   #     CONNECT_REST_ADVERTISED_HOST_NAME: connect
   #     CONNECT_GROUP_ID: towerhealth-connect
   #     CONNECT_CONFIG_STORAGE_TOPIC: towerhealth-connect-configs
@@ -142,13 +208,15 @@ services:
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
     depends_on:
-      - broker
+      - broker-1
+      - broker-2
+      - broker-3
     #  - connect
     ports:
       - "8090:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: towerhealth
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker:29092
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker-1:29092,broker-2:29092,broker-3:29092
      # KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
       #KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
     networks:
@@ -208,12 +276,14 @@ services:
     container_name: spark-stream
     user: root
     depends_on:
-      - broker
+      - broker-1
+      - broker-2
+      - broker-3
       - postgres
       - spark-master
       - spark-worker
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker:29092}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker-1:29092,broker-2:29092,broker-3:29092}
       KAFKA_TOPICS: ${SPARK_KAFKA_TOPICS:-ran_telemetry}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -241,23 +311,25 @@ services:
     restart: unless-stopped
 
   spark-weather:
-    # نسخة طبق الأصل من إعدادات spark-stream لضمان التوافق
+    # Ù†Ø³Ø®Ø© Ø·Ø¨Ù‚ Ø§Ù„Ø£ØµÙ„ Ù…Ù† Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª spark-stream Ù„Ø¶Ù…Ø§Ù† Ø§Ù„ØªÙˆØ§ÙÙ‚
     image: apache/spark:3.5.1
     container_name: spark-weather
     user: root
     depends_on:
-      - broker
+      - broker-1
+      - broker-2
+      - broker-3
       - postgres
       - spark-master
       - spark-worker
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker:29092}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker-1:29092,broker-2:29092,broker-3:29092}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-towerhealth}
       POSTGRES_USER: ${POSTGRES_USER:-towerhealth}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-towerhealth}
-      # مسار checkpoint مختلف عشان ميتخانقوش مع بعض
+      # Ù…Ø³Ø§Ø± checkpoint Ù…Ø®ØªÙ„Ù Ø¹Ø´Ø§Ù† Ù…ÙŠØªØ®Ø§Ù†Ù‚ÙˆØ´ Ù…Ø¹ Ø¨Ø¹Ø¶
       SPARK_CHECKPOINT_DIR: /tmp/towerhealth-checkpoints-weather
       HOME: /tmp
     volumes:
@@ -311,11 +383,13 @@ services:
       context: ./services/ran_generator
     container_name: ran-generator
     depends_on:
-      - broker
+      - broker-1
+      - broker-2
+      - broker-3
     environment:
       OUTPUT_MODE: ${RAN_OUTPUT_MODE:-stdout}
       RAN_INTERVAL_SECONDS: ${RAN_INTERVAL_SECONDS:-30}
-      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker:29092}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker-1:29092,broker-2:29092,broker-3:29092}
       KAFKA_TOPIC: ${RAN_KAFKA_TOPIC:-ran_telemetry}
     volumes:
       - ran_data:/data
@@ -361,7 +435,9 @@ services:
       context: ./services/weather_producer
     container_name: weather-producer
     depends_on:
-      - broker
+      - broker-1
+      - broker-2
+      - broker-3
     environment:
       OUTPUT_MODE: ${WEATHER_OUTPUT_MODE:-stdout}
       WEATHERAPI_KEY: ${WEATHERAPI_KEY}
@@ -369,7 +445,7 @@ services:
       WEATHER_LOCATION: ${WEATHER_LOCATION:-}
       WEATHER_LAT: ${WEATHER_LAT:-}
       WEATHER_LON: ${WEATHER_LON:-}
-      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker:29092}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker-1:29092,broker-2:29092,broker-3:29092}
       KAFKA_TOPIC: ${WEATHER_KAFKA_TOPIC:-weather_events}
       WEATHER_POLL_SECONDS: ${WEATHER_POLL_SECONDS:-300}
     networks:
@@ -377,6 +453,9 @@ services:
     restart: unless-stopped
 
 volumes:
+  kafka1_data:
+  kafka2_data:
+  kafka3_data:
   pg_data:
   ran_data:
   spark_ran_checkpoints:

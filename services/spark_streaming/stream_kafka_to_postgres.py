@@ -3,8 +3,11 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, current_timestamp, from_json, explode, when, expr
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, ArrayType, IntegerType
 
-# 1. الإعدادات
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "broker:29092")
+# 1. Ø§Ù„Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª
+KAFKA_BOOTSTRAP_SERVERS = os.getenv(
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "broker-1:29092,broker-2:29092,broker-3:29092",
+)
 KAFKA_TOPICS = os.getenv("KAFKA_TOPICS", "ran_telemetry")
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
 POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
@@ -14,7 +17,7 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "towerhealth")
 RAN_CHECKPOINT_DIR = os.getenv("SPARK_RAN_CHECKPOINT_DIR", "/tmp/spark_checkpoints/ran_final_v6")
 TRANSPORT_CHECKPOINT_DIR = os.getenv("SPARK_TRANSPORT_CHECKPOINT_DIR", "/tmp/spark_checkpoints/transport_final_v1")
 
-# 2. الـ Schema
+# 2. Ø§Ù„Ù€ Schema
 schema = StructType([
     StructField("message_id", StringType()),
     StructField("timestamp", StringType()),
@@ -84,7 +87,7 @@ def write_transport_batch(batch_df, batch_id):
     _jdbc_write(batch_df, "transport_metrics")
 
 def main():
-    # 1. إنشاء الـ Session أولاً
+    # 1. Ø¥Ù†Ø´Ø§Ø¡ Ø§Ù„Ù€ Session Ø£ÙˆÙ„Ø§Ù‹
     spark = SparkSession.builder \
         .appName("TowerHealth-RAN") \
         .config("spark.sql.shuffle.partitions", "2") \
@@ -95,7 +98,7 @@ def main():
 
     spark.sparkContext.setLogLevel("WARN")
 
-    # 2. القراءة من كافكا
+    # 2. Ø§Ù„Ù‚Ø±Ø§Ø¡Ø© Ù…Ù† ÙƒØ§ÙÙƒØ§
     kafka_df = spark.readStream.format("kafka") \
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
         .option("subscribe", KAFKA_TOPICS) \
@@ -103,10 +106,10 @@ def main():
         .option("startingOffsets", "earliest") \
         .option("failOnDataLoss", "false").load()
 
-    # 3. فك الـ JSON
+    # 3. ÙÙƒ Ø§Ù„Ù€ JSON
     parsed_df = kafka_df.select(from_json(col("value").cast("string"), schema).alias("data")).select("data.*")
 
-    # 4. الـ Enrichment
+    # 4. Ø§Ù„Ù€ Enrichment
     enriched_df = parsed_df.select(
         "timestamp", "message_id", "ran_metadata", "alert_summary",
         expr("aggregate(radio_units, CAST(0.0 AS DOUBLE), (acc, x) -> acc + CAST(x.temperature_c AS DOUBLE)) / size(radio_units)").alias("avg_ru_temp"),
@@ -115,10 +118,10 @@ def main():
         col("cells").alias("cells_array")
     )
     
-    # 5. الـ Explode
+    # 5. Ø§Ù„Ù€ Explode
     exploded_df = enriched_df.withColumn("cell", explode(col("cells_array")))
 
-    # 6. الـ Final Select
+    # 6. Ø§Ù„Ù€ Final Select
     final_df = exploded_df.select(
         "timestamp", "message_id",
         col("ran_metadata.site_id").alias("site_id"),
@@ -143,7 +146,7 @@ def main():
         when(col("rsrp") > -80, "Excellent").when(col("rsrp") > -95, "Good").otherwise("Poor")
     ).withColumn("ingested_at", current_timestamp())
 
-    # 7. Transport links — سطر لكل link
+    # 7. Transport links â€” Ø³Ø·Ø± Ù„ÙƒÙ„ link
     transport_df = parsed_df.select(
         "timestamp", "message_id",
         col("ran_metadata.site_id").alias("site_id"),
@@ -170,7 +173,7 @@ def main():
         100 - (col("latency_ms") * 1.5) - (col("jitter_ms") * 2) - (col("packet_loss_percent") * 20)
     ).withColumn("ingested_at", current_timestamp())
 
-    # 8. الـ Sinks
+    # 8. Ø§Ù„Ù€ Sinks
     ran_query = final_df.writeStream \
         .foreachBatch(write_ran_batch) \
         .option("checkpointLocation", RAN_CHECKPOINT_DIR) \
@@ -195,9 +198,9 @@ if __name__ == "__main__":
 # from pyspark.sql import SparkSession
 # from pyspark.sql.functions import col, current_timestamp, from_json, explode, when, concat, lit
 # from pyspark.sql.types import StructType, StructField, StringType, DoubleType, ArrayType
-# # 1. الإعدادات (نفس اللي في صورتك بالظبط)
-# KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "broker:29092")
-# KAFKA_TOPICS = os.getenv("KAFKA_TOPICS", "ran_telemetry") # ركزي على RAN حالياً
+# # 1. Ø§Ù„Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª (Ù†ÙØ³ Ø§Ù„Ù„ÙŠ ÙÙŠ ØµÙˆØ±ØªÙƒ Ø¨Ø§Ù„Ø¸Ø¨Ø·)
+# KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "broker-1:29092,broker-2:29092,broker-3:29092")
+# KAFKA_TOPICS = os.getenv("KAFKA_TOPICS", "ran_telemetry") # Ø±ÙƒØ²ÙŠ Ø¹Ù„Ù‰ RAN Ø­Ø§Ù„ÙŠØ§Ù‹
 # POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
 # POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
 # POSTGRES_DB = os.getenv("POSTGRES_DB", "towerhealth")
@@ -205,7 +208,7 @@ if __name__ == "__main__":
 # POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "towerhealth")
 # CHECKPOINT_DIR = os.getenv("SPARK_CHECKPOINT_DIR", "/tmp/towerhealth-checkpoints")
 
-# # 2. تعريف الـ Schema لفك الـ JSON المعقد (الـ Nested JSON)
+# # 2. ØªØ¹Ø±ÙŠÙ Ø§Ù„Ù€ Schema Ù„ÙÙƒ Ø§Ù„Ù€ JSON Ø§Ù„Ù…Ø¹Ù‚Ø¯ (Ø§Ù„Ù€ Nested JSON)
 # transport_schema = StructType([
 #     StructField("link_id", StringType(), True),
 #     StructField("type", StringType(), True),
@@ -233,7 +236,7 @@ if __name__ == "__main__":
 #     }
 
 # def write_batch_to_postgres(batch_df, batch_id: int) -> None:
-#     """كتابة كل Batch لجدول التحليلات في Postgres."""
+#     """ÙƒØªØ§Ø¨Ø© ÙƒÙ„ Batch Ù„Ø¬Ø¯ÙˆÙ„ Ø§Ù„ØªØ­Ù„ÙŠÙ„Ø§Øª ÙÙŠ Postgres."""
 #     if batch_df.rdd.isEmpty():
 #         return
 #     jdbc_options = postgres_jdbc_options()
@@ -241,7 +244,7 @@ if __name__ == "__main__":
 #         batch_df.write
 #         .format("jdbc")
 #         .options(**jdbc_options)
-#         .option("dbtable", "transport_metrics") # ده الجدول اللي الداشبورد هيقرأ منه
+#         .option("dbtable", "transport_metrics") # Ø¯Ù‡ Ø§Ù„Ø¬Ø¯ÙˆÙ„ Ø§Ù„Ù„ÙŠ Ø§Ù„Ø¯Ø§Ø´Ø¨ÙˆØ±Ø¯ Ù‡ÙŠÙ‚Ø±Ø£ Ù…Ù†Ù‡
 #         .mode("append")
 #         .save()
 #     )
@@ -253,7 +256,7 @@ if __name__ == "__main__":
     
 #     spark.sparkContext.setLogLevel("WARN")
 
-#     # 3. القراءة من Kafka Stream
+#     # 3. Ø§Ù„Ù‚Ø±Ø§Ø¡Ø© Ù…Ù† Kafka Stream
 #     kafka_df = spark.readStream \
 #         .format("kafka") \
 #         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
@@ -262,19 +265,19 @@ if __name__ == "__main__":
 #         .option("failOnDataLoss", "false") \
 #         .load()
 
-#     # 4. فك الـ JSON وتطبيق منطق الـ Explode (شغل زميلتك)
+#     # 4. ÙÙƒ Ø§Ù„Ù€ JSON ÙˆØªØ·Ø¨ÙŠÙ‚ Ù…Ù†Ø·Ù‚ Ø§Ù„Ù€ Explode (Ø´ØºÙ„ Ø²Ù…ÙŠÙ„ØªÙƒ)
 #     parsed_df = kafka_df.select(
 #         from_json(col("value").cast("string"), ran_schema).alias("data")
 #     ).select("data.*")
 
-#     # تحويل كل وصلة نقل (Link) لسطر منفصل عشان نعرف نحللها
+#     # ØªØ­ÙˆÙŠÙ„ ÙƒÙ„ ÙˆØµÙ„Ø© Ù†Ù‚Ù„ (Link) Ù„Ø³Ø·Ø± Ù…Ù†ÙØµÙ„ Ø¹Ø´Ø§Ù† Ù†Ø¹Ø±Ù Ù†Ø­Ù„Ù„Ù‡Ø§
 #     exploded_df = parsed_df.select(
 #         col("timestamp"),
 #         col("ran_metadata.site_id").alias("site_id"),
 #         explode(col("transport_links")).alias("transport")
 #     )
 
-#     # 5. حساب الـ KPIs والـ Severity والـ Quality Score
+#     # 5. Ø­Ø³Ø§Ø¨ Ø§Ù„Ù€ KPIs ÙˆØ§Ù„Ù€ Severity ÙˆØ§Ù„Ù€ Quality Score
 #     final_df = exploded_df.select(
 #         "timestamp", "site_id",
 #         col("transport.link_id").alias("link_id"),
@@ -296,7 +299,7 @@ if __name__ == "__main__":
 #         concat(lit("Network issue at site "), col("site_id"), lit(" on link "), col("link_id"))
 #     ).withColumn("ingested_at", current_timestamp())
 
-#     # 6. التشغيل (The Sink)
+#     # 6. Ø§Ù„ØªØ´ØºÙŠÙ„ (The Sink)
 #     query = final_df.writeStream \
 #         .foreachBatch(write_batch_to_postgres) \
 #         .option("checkpointLocation", CHECKPOINT_DIR) \

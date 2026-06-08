@@ -4,7 +4,10 @@ from pyspark.sql.functions import col, current_timestamp, from_json, when
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType
 
 # 1. الإعدادات
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "broker:29092")
+KAFKA_BOOTSTRAP_SERVERS = os.getenv(
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "broker-1:29092,broker-2:29092,broker-3:29092",
+)
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
 POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
 POSTGRES_DB = os.getenv("POSTGRES_DB", "towerhealth")

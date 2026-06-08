@@ -11,7 +11,7 @@ Environment variables:
   WEATHER_LOCATIONS           optional semicolon-separated label|lat,lon entries
   WEATHER_LOCATION            default: Cairo when WEATHER_LOCATIONS is not set
   WEATHER_LAT / WEATHER_LON   optional; overrides WEATHER_LOCATION
-  KAFKA_BOOTSTRAP_SERVERS     default: kafka-broker-1:9092
+  KAFKA_BOOTSTRAP_SERVERS     default: broker-1:29092,broker-2:29092,broker-3:29092
   KAFKA_TOPIC                 default: weather_events
   WEATHER_POLL_SECONDS        default: 300
 """
@@ -35,7 +35,7 @@ from weatherapi_client import (
 )
 
 OUTPUT_MODE                 = os.getenv("OUTPUT_MODE", "stdout")
-DEFAULT_KAFKA_BOOTSTRAP     = "kafka-broker-1:9092"
+DEFAULT_KAFKA_BOOTSTRAP     = "broker-1:29092,broker-2:29092,broker-3:29092"
 DEFAULT_KAFKA_TOPIC         = "weather_events"
 DEFAULT_LOCATION            = "Cairo"
 DEFAULT_POLL_SECONDS        = 300
@@ -185,15 +185,21 @@ def emit_stdout(event: dict[str, Any]) -> None:
 def create_kafka_producer(bootstrap_servers: str):
     from kafka import KafkaProducer
     from kafka.errors import NoBrokersAvailable
+    bootstrap_server_list = [
+        server.strip()
+        for server in bootstrap_servers.split(",")
+        if server.strip()
+    ]
 
     while running:
         try:
             # Kafka can start slower than this container. Keep retrying so
             # docker compose up works without manual ordering.
             return KafkaProducer(
-                bootstrap_servers=bootstrap_servers,
+                bootstrap_servers=bootstrap_server_list,
                 value_serializer=lambda v: json.dumps(v).encode("utf-8"),
                 key_serializer=lambda v: v.encode("utf-8"),
+                acks="all",
                 retries=5,
                 linger_ms=100,
             )
