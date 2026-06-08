@@ -57,6 +57,29 @@ CREATE TABLE IF NOT EXISTS stream_health (
     details JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
+-- Spark RAN job: one row per transport/backhaul link.
+CREATE TABLE IF NOT EXISTS transport_metrics (
+    id BIGSERIAL PRIMARY KEY,
+    timestamp TEXT,
+    message_id TEXT,
+    site_id TEXT,
+    site_name TEXT,
+    link_id TEXT,
+    link_type TEXT,
+    link_status TEXT,
+    latency_ms DOUBLE PRECISION,
+    jitter_ms DOUBLE PRECISION,
+    packet_loss_percent DOUBLE PRECISION,
+    throughput_mbps DOUBLE PRECISION,
+    utilization_percent DOUBLE PRECISION,
+    severity TEXT,
+    link_quality_score DOUBLE PRECISION,
+    ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_transport_metrics_site_ingested
+    ON transport_metrics (site_id, ingested_at DESC);
+
 CREATE TABLE IF NOT EXISTS weather_metrics (
     id BIGSERIAL PRIMARY KEY,
     event_timestamp TEXT,

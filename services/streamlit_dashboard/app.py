@@ -1,809 +1,666 @@
-"""
-Tower Monitor — Network Operations Center Dashboard
-Real-time RAN telemetry from 4 Egyptian tower sites.
-"""
+from __future__ import annotations
 
-import streamlit as st
+import os
+from datetime import datetime, timedelta
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import sqlalchemy
-from datetime import datetime
-import numpy as np
+import streamlit as st
+from sqlalchemy import create_engine
 from streamlit_autorefresh import st_autorefresh
 
-# ─── Page Configuration ────────────────────────────────────────────────────────
+# ===============================
+# CONFIGURATION
+# ===============================
 st.set_page_config(
-    page_title="Tower Monitor NOC",
+    page_title="Tower Health NOC",
     page_icon="📡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ─── Styling ───────────────────────────────────────────────────────────────────
-st.markdown("""
+st_autorefresh(interval=10000, key="refresh")
+
+PLOTLY_TEMPLATE = "plotly_dark"
+PLOTLY_LAYOUT = dict(
+    paper_bgcolor="#111827",
+    plot_bgcolor="#111827",
+    font=dict(color="#e5e7eb"),
+)
+SEVERITY_ORDER = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
+
+st.markdown(
+    """
 <style>
-  [data-testid="stAppViewContainer"] { background: #0b0f1a; }
-  [data-testid="stSidebar"] { background: #0d1526; border-right: 1px solid #1e3a5f; }
-  .block-container { padding-top: 1.2rem !important; }
-
-  div[data-testid="stMetricValue"] { font-size: 1.7rem; font-weight: 700; }
-  div[data-testid="stMetricLabel"] { font-size: 0.72rem; color: #7a9bbf;
-                                     letter-spacing: 0.05em; text-transform: uppercase; }
-  div[data-testid="stMetricDelta"] { font-size: 0.78rem; }
-
-  .noc-divider { border-top: 1px solid #1e3a5f; margin: 0.8rem 0; }
-  [data-testid="stTabs"] button { font-size: 0.85rem; padding: 0.4rem 1rem; }
-  .stDataFrame thead th {
-    background: #0d1e35 !important; color: #7a9bbf !important; font-size: 0.78rem;
-  }
+body { background-color: #030712; color: #f9fafb; }
+[data-testid="stMetric"] {
+    background-color: #111827;
+    border: 1px solid #1f2937;
+    padding: 14px;
+    border-radius: 12px;
+}
+div[data-testid="stPlotlyChart"] {
+    background-color: #111827;
+    padding: 10px;
+    border-radius: 12px;
+    border: 1px solid #1f2937;
+}
+.section-title {
+    font-size: 1.25rem;
+    font-weight: 700;
+    margin: 1rem 0 0.5rem 0;
+    color: #93c5fd;
+}
+.alert-card-critical {
+    background: #450a0a;
+    border-left: 4px solid #ef4444;
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+}
+.alert-card-warning {
+    background: #451a03;
+    border-left: 4px solid #f59e0b;
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+}
 </style>
-""", unsafe_allow_html=True)
-
-# ─── Constants ─────────────────────────────────────────────────────────────────
-DB_URL = "postgresql://towerhealth:towerhealth@localhost:5432/towerhealth"
-
-CHART_LAYOUT = dict(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(13,30,53,0.6)",
-    font=dict(color="#c0cfe0", size=11),
-    margin=dict(l=10, r=10, t=30, b=10),
-    xaxis=dict(gridcolor="#1e3a5f", linecolor="#1e3a5f", showline=False),
-    yaxis=dict(gridcolor="#1e3a5f", linecolor="#1e3a5f"),
-    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
+""",
+    unsafe_allow_html=True,
 )
 
-SITE_COLORS = {
-    "AL_TOWER_01": "#4a9eff",
-    "CA_TOWER_02": "#00e096",
-    "GZ_TOWER_03": "#ff6b35",
-    "KS_TOWER_04": "#c084fc",
-}
-TECH_COLORS   = {"4G": "#4a9eff", "5G": "#ff6b35"}
-HEALTH_COLORS = {"Healthy": "#00e096", "Degraded": "#ffaa00", "Critical": "#ff4444"}
 
-# ─── DB Helpers ────────────────────────────────────────────────────────────────
-@st.cache_resource
+# ===============================
+# DATA LAYER
+# ===============================
 def get_engine():
-    return sqlalchemy.create_engine(DB_URL, pool_pre_ping=True, pool_size=3)
+    host = os.getenv("POSTGRES_HOST", "localhost")
+    port = os.getenv("POSTGRES_PORT", "5432")
+    db = os.getenv("POSTGRES_DB", "towerhealth")
+    user = os.getenv("POSTGRES_USER", "towerhealth")
+    password = os.getenv("POSTGRES_PASSWORD", "towerhealth")
+    return create_engine(f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{db}")
 
 
-@st.cache_data(ttl=25)
-def sql(query: str) -> pd.DataFrame:
+engine = get_engine()
+
+
+def _read_table(table_name: str) -> pd.DataFrame:
     try:
-        return pd.read_sql(query, get_engine())
-    except Exception as exc:
-        st.warning(f"DB query failed: {exc}")
+        with engine.connect() as conn:
+            return pd.read_sql(f"SELECT * FROM {table_name}", conn)
+    except Exception:
         return pd.DataFrame()
 
 
-def table_exists(name: str) -> bool:
-    df = sql(f"SELECT to_regclass('public.{name}') AS t")
-    return not df.empty and df["t"].iloc[0] is not None
-
-
-# ─── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## 📡 Tower Monitor NOC")
-    st.caption("Egyptian RAN Telemetry · Live Pipeline")
-    st.markdown('<div class="noc-divider"></div>', unsafe_allow_html=True)
-
-    time_window = st.selectbox(
-        "Time Window",
-        ["Last 15 min", "Last 1 hour", "Last 6 hours", "Last 24 hours"],
-        index=1,
+@st.cache_data(ttl=5)
+def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    return (
+        _read_table("processed_ran_metrics"),
+        _read_table("transport_metrics"),
+        _read_table("weather_metrics"),
     )
-    MINS = {
-        "Last 15 min": 15,
-        "Last 1 hour": 60,
-        "Last 6 hours": 360,
-        "Last 24 hours": 1440,
-    }[time_window]
-
-    refresh_s = st.selectbox("Auto-refresh (s)", [15, 30, 60], index=1)
-
-    st.markdown('<div class="noc-divider"></div>', unsafe_allow_html=True)
-    if st.button("🔄  Refresh Now", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-
-    st.markdown('<div class="noc-divider"></div>', unsafe_allow_html=True)
-    st.caption(f"🕐  {datetime.now().strftime('%H:%M:%S  ·  %d %b %Y')}")
-
-# Auto-refresh ticker
-st_autorefresh(interval=refresh_s * 1000, key="noc_refresh")
-
-# ─── Page Header ───────────────────────────────────────────────────────────────
-st.markdown("# 📡  Tower Monitor — Network Operations Center")
-st.caption(
-    f"4 sites · Alexandria · Cairo · Giza · North Sinai  |  "
-    f"Window: **{time_window}**  |  Refresh every **{refresh_s}s**  |  "
-    f"As of {datetime.now().strftime('%H:%M:%S')}"
-)
-st.markdown('<div class="noc-divider"></div>', unsafe_allow_html=True)
-
-# ─── Load Data ─────────────────────────────────────────────────────────────────
-HAS_RAN   = table_exists("processed_ran_metrics")
-HAS_WX    = table_exists("weather_metrics")
-HAS_KAFKA = table_exists("kafka_events")
-
-if HAS_RAN:
-    latest_ran = sql("""
-        SELECT DISTINCT ON (site_id, cell_id)
-            site_id, site_name, vendor, lat, lon,
-            cell_id, tech, cell_status, users, downlink_mbps,
-            rsrp, rsrq, sinr, cqi, ho_success_rate, signal_quality,
-            alert_severity, avg_ru_temp, battery_charge, battery_status,
-            ingested_at
-        FROM processed_ran_metrics
-        ORDER BY site_id, cell_id, ingested_at DESC
-    """)
-
-    ran_ts = sql(f"""
-        SELECT
-            DATE_TRUNC('minute', ingested_at)   AS ts,
-            site_name, vendor, tech,
-            AVG(sinr)            AS avg_sinr,
-            AVG(rsrp)            AS avg_rsrp,
-            AVG(rsrq)            AS avg_rsrq,
-            AVG(cqi)             AS avg_cqi,
-            SUM(users)           AS total_users,
-            AVG(downlink_mbps)   AS avg_dl_mbps,
-            AVG(ho_success_rate) AS avg_ho
-        FROM processed_ran_metrics
-        WHERE ingested_at > NOW() - INTERVAL '{MINS} minutes'
-        GROUP BY 1, 2, 3, 4
-        ORDER BY 1
-    """)
-
-    alerts_df = sql(f"""
-        SELECT ingested_at, site_name, vendor, tech,
-               alert_severity, cell_id, sinr, rsrp, users, downlink_mbps
-        FROM processed_ran_metrics
-        WHERE alert_severity IN ('CRITICAL','WARNING')
-          AND ingested_at > NOW() - INTERVAL '{MINS} minutes'
-        ORDER BY ingested_at DESC
-        LIMIT 300
-    """)
-else:
-    latest_ran = ran_ts = alerts_df = pd.DataFrame()
-
-if HAS_WX:
-    latest_wx = sql("""
-        SELECT DISTINCT ON (ran_site_id)
-            ran_site_id, ran_site_name, ran_region,
-            weather_temperature_c, weather_humidity_pct,
-            weather_rainfall_mm, weather_wind_speed_kmh,
-            weather_condition, is_raining, rain_intensity, ingested_at
-        FROM weather_metrics
-        ORDER BY ran_site_id, ingested_at DESC
-    """)
-    wx_ts = sql(f"""
-        SELECT
-            DATE_TRUNC('hour', ingested_at)       AS ts,
-            ran_site_name,
-            AVG(weather_temperature_c)  AS avg_temp,
-            AVG(weather_humidity_pct)   AS avg_humidity,
-            AVG(weather_rainfall_mm)    AS avg_rain,
-            AVG(weather_wind_speed_kmh) AS avg_wind
-        FROM weather_metrics
-        WHERE ingested_at > NOW() - INTERVAL '{MINS} minutes'
-        GROUP BY 1, 2
-        ORDER BY 1
-    """)
-else:
-    latest_wx = wx_ts = pd.DataFrame()
-
-# ─── KPI Row ───────────────────────────────────────────────────────────────────
-active_sites = latest_ran["site_id"].nunique() if not latest_ran.empty else 0
-total_users  = int(latest_ran["users"].sum())   if not latest_ran.empty else 0
-avg_sinr     = latest_ran["sinr"].mean()         if not latest_ran.empty else float("nan")
-avg_rsrp     = latest_ran["rsrp"].mean()         if not latest_ran.empty else float("nan")
-avg_dl       = latest_ran["downlink_mbps"].mean() if not latest_ran.empty else float("nan")
-n_crit_kpi   = len(alerts_df[alerts_df["alert_severity"] == "CRITICAL"]) if not alerts_df.empty else 0
-avg_bat      = latest_ran["battery_charge"].mean() if not latest_ran.empty else float("nan")
-
-kc = st.columns(7)
-kc[0].metric("Active Sites",       f"{active_sites}/4",
-             "All Online" if active_sites == 4 else f"{4-active_sites} Offline",
-             delta_color="normal" if active_sites == 4 else "inverse")
-kc[1].metric("Connected Users",    f"{total_users:,}")
-kc[2].metric("Avg SINR",           f"{avg_sinr:.1f} dB"   if not np.isnan(avg_sinr)  else "–",
-             "Good" if (not np.isnan(avg_sinr) and avg_sinr >= 10) else "Poor",
-             delta_color="normal"  if (not np.isnan(avg_sinr) and avg_sinr >= 10) else "inverse")
-kc[3].metric("Avg RSRP",           f"{avg_rsrp:.1f} dBm"  if not np.isnan(avg_rsrp) else "–",
-             "OK" if (not np.isnan(avg_rsrp) and avg_rsrp >= -90) else "Weak",
-             delta_color="normal"  if (not np.isnan(avg_rsrp) and avg_rsrp >= -90) else "inverse")
-kc[4].metric("Avg DL Throughput",  f"{avg_dl:.1f} Mbps"   if not np.isnan(avg_dl)   else "–")
-kc[5].metric("Critical Alerts",    n_crit_kpi,
-             delta_color="inverse" if n_crit_kpi > 0 else "off")
-kc[6].metric("Avg Battery",        f"{avg_bat:.0f}%"       if not np.isnan(avg_bat)  else "–",
-             "OK" if (not np.isnan(avg_bat) and avg_bat >= 50) else "Low",
-             delta_color="normal"  if (not np.isnan(avg_bat) and avg_bat >= 50) else "inverse")
-
-st.markdown('<div class="noc-divider"></div>', unsafe_allow_html=True)
-
-# ─── Tabs ──────────────────────────────────────────────────────────────────────
-(tab_overview, tab_radio, tab_cells,
- tab_alerts, tab_wx, tab_infra, tab_stream) = st.tabs([
-    "🗺️ Overview",
-    "📶 Radio Performance",
-    "📊 Cell Analytics",
-    "🚨 Alerts",
-    "🌤️ Weather Impact",
-    "🔋 Infrastructure",
-    "⚡ Stream Health",
-])
 
 
-# ══════════════════════════════════════════════════════════════════════
-# TAB 1 — OVERVIEW
-# ══════════════════════════════════════════════════════════════════════
-with tab_overview:
-    if latest_ran.empty:
-        st.info("⏳  Waiting for RAN data — pipeline may still be initialising.")
+def latest_snapshot(df: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    if "ingested_at" in out.columns:
+        out["ingested_at"] = pd.to_datetime(out["ingested_at"], errors="coerce")
+        out = out.sort_values("ingested_at")
+    return out.groupby(keys, as_index=False).last()
+
+
+def geo_key(lat: pd.Series, lon: pd.Series) -> pd.Series:
+    return lat.round(3).astype(str) + "_" + lon.round(3).astype(str)
+
+
+def query_geo_key(query: pd.Series) -> pd.Series:
+    parts = query.astype(str).str.split(",", expand=True)
+    lat = pd.to_numeric(parts[0], errors="coerce")
+    lon = pd.to_numeric(parts[1], errors="coerce")
+    return geo_key(lat, lon)
+
+
+def _has_ran_site_ids(df: pd.DataFrame) -> bool:
+    if "ran_site_id" not in df.columns:
+        return False
+    return df["ran_site_id"].fillna("").astype(str).str.strip().ne("").any()
+
+
+def weather_snapshot_keys(df: pd.DataFrame) -> list[str]:
+    return ["ran_site_id"] if _has_ran_site_ids(df) else ["location_query"]
+
+
+def weather_geo_key(wx: pd.DataFrame) -> pd.Series:
+    if "location_query" in wx.columns and wx["location_query"].fillna("").astype(str).str.strip().ne("").any():
+        return query_geo_key(wx["location_query"])
+    return geo_key(wx["weather_latitude"], wx["weather_longitude"])
+
+
+def join_ran_weather(ran: pd.DataFrame, weather: pd.DataFrame) -> pd.DataFrame:
+    if ran.empty or weather.empty:
+        return pd.DataFrame()
+
+    wx = latest_snapshot(weather, weather_snapshot_keys(weather)).copy()
+    wx["_geo_key"] = weather_geo_key(wx)
+    out = ran.copy()
+    out["_geo_key"] = geo_key(out["lat"], out["lon"])
+
+    merged = out.merge(wx, left_on="site_id", right_on="ran_site_id", how="left", suffixes=("", "_wx"))
+    missing = merged["weather_temperature_c"].isna()
+    if missing.any():
+        geo_part = out.loc[missing, ["site_id", "cell_id", "_geo_key"]].merge(
+            wx.drop(columns=["ran_site_id"], errors="ignore"), on="_geo_key", how="left"
+        )
+        for col in [
+            "ran_site_id", "ran_site_name", "weather_temperature_c", "weather_humidity_pct",
+            "weather_rainfall_mm", "weather_wind_speed_kmh", "weather_condition",
+            "is_raining", "rain_intensity", "weather_location_name",
+        ]:
+            if col in geo_part.columns:
+                merged.loc[missing, col] = geo_part[col].values
+    return merged.drop(columns=["_geo_key", "_geo_key_wx"], errors="ignore")
+
+
+def site_level_insights(merged: pd.DataFrame) -> pd.DataFrame:
+    if merged.empty:
+        return merged
+    return merged.groupby(["site_id", "site_name"], as_index=False).agg(
+        users=("users", "sum"),
+        cells=("cell_id", "count"),
+        avg_sinr=("sinr", "mean"),
+        avg_rsrp=("rsrp", "mean"),
+        avg_cqi=("cqi", "mean"),
+        avg_downlink_mbps=("downlink_mbps", "mean"),
+        poor_cells=("signal_quality", lambda s: int((s == "Poor").sum())),
+        weather_temperature_c=("weather_temperature_c", "first"),
+        weather_humidity_pct=("weather_humidity_pct", "first"),
+        weather_rainfall_mm=("weather_rainfall_mm", "first"),
+        weather_wind_speed_kmh=("weather_wind_speed_kmh", "first"),
+        weather_condition=("weather_condition", "first"),
+        is_raining=("is_raining", "first"),
+        rain_intensity=("rain_intensity", "first"),
+        battery_status=("battery_status", "first"),
+        battery_charge=("battery_charge", "first"),
+        alert_severity=("alert_severity", "first"),
+    )
+
+
+def apply_plotly_style(fig: go.Figure) -> go.Figure:
+    fig.update_layout(**PLOTLY_LAYOUT)
+    return fig
+
+
+def filter_last_hour(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "ingested_at" not in df.columns:
+        return df
+    out = df.copy()
+    out["ingested_at"] = pd.to_datetime(out["ingested_at"], errors="coerce")
+    cutoff = out["ingested_at"].max() - timedelta(hours=1)
+    if pd.isna(cutoff):
+        return out
+    return out[out["ingested_at"] >= cutoff]
+
+
+def build_alert_feed(
+    ran_latest: pd.DataFrame,
+    transport_latest: pd.DataFrame,
+    ran_weather: pd.DataFrame,
+) -> list[dict]:
+    alerts: list[dict] = []
+    seen: set[str] = set()
+
+    def add(severity: str, category: str, site: str, message: str, ts=None):
+        key = f"{severity}|{site}|{message}"
+        if key in seen:
+            return
+        seen.add(key)
+        alerts.append({
+            "severity": severity,
+            "category": category,
+            "site": site,
+            "message": message,
+            "time": ts,
+        })
+
+    for _, row in ran_latest.iterrows():
+        site = row.get("site_name", "Unknown")
+        ts = row.get("ingested_at")
+        cell = row.get("cell_id", "?")
+
+        if row.get("alert_severity") == "CRITICAL":
+            add("CRITICAL", "Network", site,
+                f"Critical alert at {site} — highest severity on cell {cell}", ts)
+
+        bat_status = str(row.get("battery_status", "")).upper()
+        if bat_status in ("DOWN", "FAILED"):
+            add("CRITICAL", "Power", site,
+                f"Damaged battery at {site} — battery status: {row.get('battery_status')}", ts)
+        elif pd.notna(row.get("battery_charge")) and row["battery_charge"] < 20:
+            add("WARNING", "Power", site,
+                f"Low battery at {site} — charge {row['battery_charge']:.0f}%", ts)
+
+        if row.get("cell_status") != "UP":
+            add("CRITICAL", "Radio", site,
+                f"Cell {cell} is DOWN at {site} — check RU/antenna/backhaul", ts)
+        elif row.get("signal_quality") == "Poor":
+            add("WARNING", "Signal", site,
+                f"Poor signal on {cell} at {site} — RSRP {row.get('rsrp', 0):.1f} dBm", ts)
+
+        if pd.notna(row.get("ho_success_rate")) and row["ho_success_rate"] < 93:
+            add("WARNING", "Mobility", site,
+                f"Low handover success on {cell} at {site} — HSR {row['ho_success_rate']:.1f}%", ts)
+
+    for _, row in transport_latest.iterrows():
+        site = row.get("site_name", "Unknown")
+        ts = row.get("ingested_at")
+        link = row.get("link_id", "?")
+        if row.get("severity") == "CRITICAL":
+            add("CRITICAL", "Transport", site,
+                f"Backhaul CRITICAL on link {link} at {site} — "
+                f"latency {row.get('latency_ms', 0):.1f}ms, loss {row.get('packet_loss_percent', 0):.2f}%", ts)
+        elif row.get("severity") == "WARNING":
+            add("WARNING", "Transport", site,
+                f"Backhaul degradation on {link} at {site} — utilization {row.get('utilization_percent', 0):.1f}%", ts)
+
+    if not ran_weather.empty:
+        matched = ran_weather.dropna(subset=["weather_temperature_c"])
+        for _, row in matched.iterrows():
+            site = row.get("site_name", "Unknown")
+            ts = row.get("ingested_at")
+            if row.get("rain_intensity") in ("Moderate", "Heavy") and row.get("signal_quality") == "Poor":
+                add("WARNING", "Weather", site,
+                    f"Heavy rainfall ({row.get('rain_intensity')}) may be affecting {row.get('cell_id')} "
+                    f"at {site} — SINR {row.get('sinr', 0):.1f} dB", ts)
+            if row.get("is_raining") and pd.notna(row.get("downlink_mbps")) and row["downlink_mbps"] < 100:
+                add("WARNING", "Weather", site,
+                    f"Throughput drop during rain at {site} — downlink {row['downlink_mbps']:.0f} Mbps", ts)
+
+    alerts.sort(key=lambda a: (SEVERITY_ORDER.get(a["severity"], 9), str(a.get("time") or "")))
+    return alerts
+
+
+def render_alert_feed(alerts: list[dict], max_items: int = 8):
+    if not alerts:
+        st.success("✅ No active alerts — network operating normally.")
+        return
+
+    critical = [a for a in alerts if a["severity"] == "CRITICAL"]
+    warning = [a for a in alerts if a["severity"] == "WARNING"]
+    st.markdown(f"**{len(critical)} critical** · **{len(warning)} warnings** · {len(alerts)} total")
+
+    for alert in alerts[:max_items]:
+        css = "alert-card-critical" if alert["severity"] == "CRITICAL" else "alert-card-warning"
+        icon = "🚨" if alert["severity"] == "CRITICAL" else "⚠️"
+        st.markdown(
+            f'<div class="{css}">{icon} <b>[{alert["category"]}]</b> {alert["site"]}: {alert["message"]}</div>',
+            unsafe_allow_html=True,
+        )
+    if len(alerts) > max_items:
+        st.caption(f"+ {len(alerts) - max_items} more alerts")
+
+
+def render_header():
+    c1, c2 = st.columns([8, 2])
+    c1.title("📡 Tower Health — NOC")
+    c2.success("🟢 LIVE")
+    st.caption(f"Last refresh: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · auto-refresh 10s")
+
+
+def infer_cell_cause(row: pd.Series) -> str:
+    if row.get("cell_status") != "UP":
+        return "Cell radio unit or sector reported DOWN — possible hardware or power fault."
+    if row.get("signal_quality") == "Poor":
+        return f"Weak RF coverage — RSRP {row.get('rsrp', 0):.1f} dBm, possible interference or weather fade."
+    if pd.notna(row.get("ho_success_rate")) and row["ho_success_rate"] < 93:
+        return f"Mobility issues — handover success {row['ho_success_rate']:.1f}% below threshold."
+    if str(row.get("battery_status", "")).upper() in ("DOWN", "FAILED"):
+        return "Site power/battery fault may be impacting cell availability."
+    return "No major fault detected — cell operating within normal parameters."
+
+
+# ===============================
+# LOAD DATA
+# ===============================
+ran_df, transport_df, weather_df = load_data()
+ran_latest = latest_snapshot(ran_df, ["site_id", "cell_id"])
+transport_latest = latest_snapshot(transport_df, ["site_id", "link_id"])
+weather_latest = latest_snapshot(weather_df, weather_snapshot_keys(weather_df))
+ran_weather = join_ran_weather(ran_latest, weather_df)
+site_insights = site_level_insights(ran_weather)
+alert_feed = build_alert_feed(ran_latest, transport_latest, ran_weather)
+ran_hour = filter_last_hour(ran_df)
+transport_hour = filter_last_hour(transport_df)
+
+
+# ===============================
+# PAGE 1 — NETWORK OVERVIEW
+# ===============================
+def page_network_overview():
+    render_header()
+    st.markdown('<p class="section-title">🚨 Active Alerts</p>', unsafe_allow_html=True)
+    render_alert_feed(alert_feed)
+
+    if ran_latest.empty:
+        st.warning("Waiting for Kafka → Spark → Postgres pipeline.")
+        return
+
+    active_cells = int((ran_latest["cell_status"] == "UP").sum())
+    total_cells = len(ran_latest)
+    total_users = int(ran_latest["users"].sum())
+    critical_count = sum(1 for a in alert_feed if a["severity"] == "CRITICAL")
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("👥 Active Users", f"{total_users:,}")
+    k2.metric("✅ Cells UP", f"{active_cells}/{total_cells}")
+    k3.metric("🚨 Critical Alerts", critical_count)
+    k4.metric("⚡ Avg SINR", f"{ran_latest['sinr'].mean():.1f} dB")
+    k5.metric("🔋 Avg Battery", f"{ran_latest['battery_charge'].mean():.0f}%")
+
+    st.markdown('<p class="section-title">📈 Performance — Last Hour</p>', unsafe_allow_html=True)
+    t1, t2 = st.columns(2)
+
+    with t1:
+        if not ran_hour.empty and "ingested_at" in ran_hour.columns:
+            tp = (
+                ran_hour.groupby("ingested_at", as_index=False)
+                .agg(throughput_mbps=("downlink_mbps", "mean"))
+                .sort_values("ingested_at")
+            )
+            fig = px.line(
+                tp, x="ingested_at", y="throughput_mbps",
+                markers=True, template=PLOTLY_TEMPLATE,
+                labels={"ingested_at": "Time", "throughput_mbps": "Avg Downlink (Mbps)"},
+                title="Network Throughput (hourly trend)",
+            )
+            st.plotly_chart(apply_plotly_style(fig), use_container_width=True)
+        else:
+            st.info("Collecting throughput history — check back after a few streaming batches.")
+
+    with t2:
+        if not transport_hour.empty and "ingested_at" in transport_hour.columns:
+            lat = (
+                transport_hour.groupby("ingested_at", as_index=False)
+                .agg(latency_ms=("latency_ms", "mean"))
+                .sort_values("ingested_at")
+            )
+            fig = px.line(
+                lat, x="ingested_at", y="latency_ms",
+                markers=True, template=PLOTLY_TEMPLATE,
+                labels={"ingested_at": "Time", "latency_ms": "Avg Latency (ms)"},
+                title="Backhaul Latency (hourly trend)",
+            )
+            st.plotly_chart(apply_plotly_style(fig), use_container_width=True)
+        else:
+            st.info("No transport latency history yet.")
+
+    st.markdown('<p class="section-title">🗺️ Network Map</p>', unsafe_allow_html=True)
+    site_map = (
+        ran_latest.groupby(["site_id", "site_name", "lat", "lon"], as_index=False)
+        .agg(downlink_mbps=("downlink_mbps", "mean"), users=("users", "sum"),
+             alert_severity=("alert_severity", "first"))
+    )
+    if not site_map.empty and site_map["lat"].notna().any():
+        fig = px.scatter_geo(
+            site_map, lat="lat", lon="lon", color="downlink_mbps", size="users",
+            hover_name="site_name", color_continuous_scale="Turbo", template=PLOTLY_TEMPLATE,
+        )
+        fig.update_geos(fitbounds="locations", showcountries=True, landcolor="#1f2937", oceancolor="#030712")
+        st.plotly_chart(apply_plotly_style(fig), use_container_width=True)
+
+
+# ===============================
+# PAGE 2 — TOWER INSIGHTS
+# ===============================
+def page_tower_insights():
+    render_header()
+    if ran_latest.empty:
+        st.warning("No tower data available.")
+        return
+
+    sites = sorted(ran_latest["site_name"].unique())
+    selected = st.selectbox("Select Tower", sites, key="tower_select")
+
+    tower_cells = ran_latest[ran_latest["site_name"] == selected]
+    tower_merged = ran_weather[ran_weather["site_name"] == selected] if not ran_weather.empty else tower_cells
+    tower_alerts = [a for a in alert_feed if a["site"] == selected]
+
+    st.markdown(f'<p class="section-title">🗼 {selected}</p>', unsafe_allow_html=True)
+
+    if tower_alerts:
+        st.markdown("**Alerts for this tower**")
+        render_alert_feed(tower_alerts, max_items=6)
     else:
-        site_sum = (
-            latest_ran.groupby(["site_id", "site_name", "vendor", "lat", "lon"])
-            .agg(
-                total_users =("users",          "sum"),
-                avg_sinr    =("sinr",           "mean"),
-                avg_rsrp    =("rsrp",           "mean"),
-                avg_dl      =("downlink_mbps",  "mean"),
-                avg_battery =("battery_charge", "mean"),
-                n_critical  =("alert_severity", lambda x: (x == "CRITICAL").sum()),
-            )
-            .reset_index().round(2)
-        )
+        st.success(f"✅ {selected} — no active alerts")
 
-        def _health(row):
-            return sum([
-                row["avg_sinr"]    >= 10,
-                row["avg_rsrp"]    >= -90,
-                row["avg_battery"] >= 40,
-                row["n_critical"]  == 0,
-            ]) / 4 * 100
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("Cells", len(tower_cells))
+    t2.metric("Users", int(tower_cells["users"].sum()))
+    t3.metric("Avg SINR", f"{tower_cells['sinr'].mean():.1f} dB")
+    t4.metric("Avg HSR", f"{tower_cells['ho_success_rate'].mean():.1f}%")
 
-        site_sum["health_score"]  = site_sum.apply(_health, axis=1)
-        site_sum["health_status"] = site_sum["health_score"].apply(
-            lambda s: "Healthy" if s >= 75 else ("Degraded" if s >= 50 else "Critical")
-        )
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Signal Quality")
+        sq = tower_cells["signal_quality"].value_counts().reset_index()
+        sq.columns = ["quality", "count"]
+        fig = px.pie(sq, names="quality", values="count",
+                     color="quality", color_discrete_map={"Excellent": "#22c55e", "Good": "#3b82f6", "Poor": "#ef4444"},
+                     template=PLOTLY_TEMPLATE)
+        st.plotly_chart(apply_plotly_style(fig), use_container_width=True)
 
-        left, right = st.columns([3, 2])
+    with c2:
+        st.subheader("RSRP vs RSRQ")
+        fig = px.scatter(tower_cells, x="rsrp", y="rsrq", color="cell_id", trendline="ols",
+                         template=PLOTLY_TEMPLATE, labels={"rsrp": "RSRP (dBm)", "rsrq": "RSRQ (dB)"})
+        st.plotly_chart(apply_plotly_style(fig), use_container_width=True)
 
-        with left:
-            st.markdown("##### 🗺️ Site Map — Egypt")
-            fig_map = px.scatter_mapbox(
-                site_sum, lat="lat", lon="lon",
-                color="health_status", size="total_users", size_max=45,
-                hover_name="site_name",
-                hover_data={"vendor":True,"total_users":True,"avg_sinr":":.1f",
-                            "avg_rsrp":":.1f","avg_battery":":.0f",
-                            "lat":False,"lon":False},
-                color_discrete_map=HEALTH_COLORS,
-                zoom=5, mapbox_style="carto-darkmatter",
-            )
-            fig_map.update_layout(
-                height=360, paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#c0cfe0"), margin=dict(l=0,r=0,t=0,b=0),
-            )
-            st.plotly_chart(fig_map, use_container_width=True)
+    c3, c4 = st.columns(2)
+    with c3:
+        st.subheader("Handover Success by Cell")
+        fig = px.bar(tower_cells, x="cell_id", y="ho_success_rate", color="ho_success_rate",
+                     color_continuous_scale="RdYlGn", range_color=[90, 100], template=PLOTLY_TEMPLATE)
+        st.plotly_chart(apply_plotly_style(fig), use_container_width=True)
 
-        with right:
-            st.markdown("##### Signal Quality")
-            if "signal_quality" in latest_ran.columns:
-                sq = latest_ran["signal_quality"].value_counts()
-                fig = go.Figure(go.Pie(
-                    labels=sq.index, values=sq.values, hole=0.52,
-                    marker_colors=["#00e096","#ffaa00","#ff4444"],
-                    textfont=dict(size=11),
-                ))
-                fig.update_layout(height=165, paper_bgcolor="rgba(0,0,0,0)",
-                                   font=dict(color="#c0cfe0"),
-                                   legend=dict(bgcolor="rgba(0,0,0,0)",font=dict(size=10)),
-                                   margin=dict(l=0,r=0,t=10,b=0))
-                st.plotly_chart(fig, use_container_width=True)
+    with c4:
+        st.subheader("Tower Health Summary")
+        if not site_insights.empty:
+            row = site_insights[site_insights["site_name"] == selected]
+            if not row.empty:
+                r = row.iloc[0]
+                st.write(f"**Vendor region cells:** {int(r['cells'])}")
+                st.write(f"**Poor signal cells:** {int(r['poor_cells'])}")
+                st.write(f"**Battery:** {r.get('battery_status', 'N/A')} ({r.get('battery_charge', 0):.0f}%)")
+                if r.get("is_raining"):
+                    st.write(f"**Weather:** 🌧️ {r.get('weather_condition')} — {r.get('rain_intensity')} rain")
+                else:
+                    st.write(f"**Weather:** {r.get('weather_condition', 'N/A')}")
 
-            st.markdown("##### 4G vs 5G Users")
-            if "tech" in latest_ran.columns:
-                tu = latest_ran.groupby("tech")["users"].sum()
-                fig = go.Figure(go.Pie(
-                    labels=tu.index, values=tu.values, hole=0.52,
-                    marker_colors=[TECH_COLORS.get(t,"#888") for t in tu.index],
-                    textfont=dict(size=11),
-                ))
-                fig.update_layout(height=165, paper_bgcolor="rgba(0,0,0,0)",
-                                   font=dict(color="#c0cfe0"),
-                                   legend=dict(bgcolor="rgba(0,0,0,0)",font=dict(size=10)),
-                                   margin=dict(l=0,r=0,t=10,b=0))
-                st.plotly_chart(fig, use_container_width=True)
-
-        st.markdown("##### Site Status Summary")
-        disp = site_sum[[
-            "site_name","vendor","total_users","avg_sinr","avg_rsrp",
-            "avg_dl","avg_battery","n_critical","health_status","health_score",
-        ]].copy()
-        disp.columns = ["Site","Vendor","Users","SINR (dB)","RSRP (dBm)",
-                         "DL Mbps","Battery %","Crit Alerts","Status","Health"]
-
-        def _clr_status(v):
-            if v == "Critical":  return "color:#ff4444;font-weight:700"
-            if v == "Degraded":  return "color:#ffaa00;font-weight:600"
-            return "color:#00e096"
-
+    tower_transport = transport_latest[transport_latest["site_name"] == selected]
+    if not tower_transport.empty:
+        st.subheader("Backhaul Links")
         st.dataframe(
-            disp.style
-                .map(_clr_status, subset=["Status"])
-                .background_gradient(subset=["Health"], cmap="RdYlGn", vmin=0, vmax=100),
+            tower_transport[["link_id", "link_type", "link_status", "latency_ms",
+                             "utilization_percent", "severity"]],
             use_container_width=True, hide_index=True,
         )
 
 
-# ══════════════════════════════════════════════════════════════════════
-# TAB 2 — RADIO PERFORMANCE
-# ══════════════════════════════════════════════════════════════════════
-with tab_radio:
-    if ran_ts.empty:
-        st.info("⏳  No history yet for the selected time window.")
+# ===============================
+# PAGE 3 — CELL DIAGNOSTICS
+# ===============================
+def page_cell_diagnostics():
+    render_header()
+    if ran_latest.empty:
+        st.warning("No cell data available.")
+        return
+
+    labels = [f"{r['site_name']} / {r['cell_id']} ({r['tech']})" for _, r in ran_latest.iterrows()]
+    idx = st.selectbox("Select Cell", range(len(labels)), format_func=lambda i: labels[i], key="cell_select")
+    cell = ran_latest.iloc[idx]
+    cell_wx = (
+        ran_weather[(ran_weather["site_id"] == cell["site_id"]) & (ran_weather["cell_id"] == cell["cell_id"])]
+        if not ran_weather.empty else pd.DataFrame()
+    )
+
+    status_color = "🟢" if cell["cell_status"] == "UP" else "🔴"
+    st.markdown(f'<p class="section-title">{status_color} {cell["cell_id"]} @ {cell["site_name"]}</p>',
+                unsafe_allow_html=True)
+
+    cell_alerts = [a for a in alert_feed if cell["cell_id"] in a["message"] and cell["site_name"] == a["site"]]
+    if cell_alerts:
+        render_alert_feed(cell_alerts, max_items=5)
     else:
-        r1, r2 = st.columns(2)
+        st.success("No alerts for this cell.")
 
-        with r1:
-            st.markdown("##### SINR Over Time")
-            fig = px.line(ran_ts, x="ts", y="avg_sinr", color="site_name",
-                          labels={"ts":"","avg_sinr":"SINR (dB)","site_name":"Site"},
-                          color_discrete_map=SITE_COLORS)
-            fig.add_hline(y=10, line_dash="dash", line_color="#ffaa00",
-                          annotation_text="Threshold 10 dB", annotation_font_size=10)
-            fig.update_layout(height=270, **CHART_LAYOUT)
-            st.plotly_chart(fig, use_container_width=True)
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Status", cell["cell_status"])
+    m2.metric("Signal", cell["signal_quality"])
+    m3.metric("Users", int(cell["users"]))
+    m4.metric("RSRP", f"{cell['rsrp']:.1f} dBm")
+    m5.metric("Downlink", f"{cell['downlink_mbps']:.0f} Mbps")
 
-        with r2:
-            st.markdown("##### RSRP Over Time")
-            fig = px.line(ran_ts, x="ts", y="avg_rsrp", color="site_name",
-                          labels={"ts":"","avg_rsrp":"RSRP (dBm)","site_name":"Site"},
-                          color_discrete_map=SITE_COLORS)
-            fig.add_hline(y=-90,  line_dash="dash", line_color="#ffaa00",
-                          annotation_text="Weak  −90 dBm", annotation_font_size=10)
-            fig.add_hline(y=-110, line_dash="dot",  line_color="#ff4444",
-                          annotation_text="Critical −110 dBm", annotation_font_size=10)
-            fig.update_layout(height=270, **CHART_LAYOUT)
-            st.plotly_chart(fig, use_container_width=True)
+    st.subheader("📍 Location")
+    loc1, loc2 = st.columns([1, 2])
+    with loc1:
+        st.write(f"**Site ID:** {cell['site_id']}")
+        st.write(f"**Latitude:** {cell['lat']:.4f}")
+        st.write(f"**Longitude:** {cell['lon']:.4f}")
+        st.write(f"**Technology:** {cell['tech']}")
+        if not cell_wx.empty and pd.notna(cell_wx.iloc[0].get("weather_condition")):
+            wx = cell_wx.iloc[0]
+            st.write(f"**Weather:** {wx.get('weather_condition')} · {wx.get('weather_temperature_c', 0):.0f}°C")
+            if wx.get("is_raining"):
+                st.write(f"**Rain:** {wx.get('rain_intensity')} ({wx.get('weather_rainfall_mm', 0):.1f} mm)")
+    with loc2:
+        fig = px.scatter_geo(
+            pd.DataFrame([cell]), lat="lat", lon="lon", text="cell_id",
+            template=PLOTLY_TEMPLATE, title="Cell geographic position",
+        )
+        fig.update_geos(fitbounds="locations", showcountries=True, landcolor="#1f2937")
+        fig.update_traces(marker=dict(size=14, color="#3b82f6"))
+        st.plotly_chart(apply_plotly_style(fig), use_container_width=True)
 
-        r3, r4 = st.columns(2)
-
-        with r3:
-            st.markdown("##### Downlink Throughput (Mbps)")
-            fig = px.area(ran_ts, x="ts", y="avg_dl_mbps", color="site_name",
-                          labels={"ts":"","avg_dl_mbps":"DL Mbps","site_name":"Site"},
-                          color_discrete_map=SITE_COLORS)
-            fig.update_layout(height=250, **CHART_LAYOUT)
-            st.plotly_chart(fig, use_container_width=True)
-
-        with r4:
-            st.markdown("##### Connected Users Over Time")
-            fig = px.area(ran_ts, x="ts", y="total_users", color="site_name",
-                          labels={"ts":"","total_users":"Users","site_name":"Site"},
-                          color_discrete_map=SITE_COLORS)
-            fig.update_layout(height=250, **CHART_LAYOUT)
-            st.plotly_chart(fig, use_container_width=True)
-
-        r5, r6 = st.columns(2)
-
-        with r5:
-            st.markdown("##### Signal KPIs by Vendor (current)")
-            if not latest_ran.empty:
-                v_kpi = (latest_ran.groupby("vendor")
-                         .agg(avg_sinr=("sinr","mean"), avg_cqi=("cqi","mean"))
-                         .reset_index().round(2))
-                fig = go.Figure()
-                for col_, color in [("avg_sinr","#4a9eff"), ("avg_cqi","#00e096")]:
-                    fig.add_trace(go.Bar(
-                        name=col_.replace("avg_","").upper(),
-                        x=v_kpi["vendor"], y=v_kpi[col_],
-                        marker_color=color,
-                    ))
-                fig.update_layout(barmode="group", height=250, **CHART_LAYOUT)
-                st.plotly_chart(fig, use_container_width=True)
-
-        with r6:
-            st.markdown("##### Handover Success Rate (%)")
-            ho = ran_ts.groupby("site_name")["avg_ho"].mean().reset_index()
-            bar_c = ["#00e096" if v >= 90 else "#ffaa00" if v >= 70 else "#ff4444"
-                     for v in ho["avg_ho"]]
-            fig = go.Figure(go.Bar(
-                x=ho["site_name"], y=ho["avg_ho"],
-                marker_color=bar_c,
-                text=ho["avg_ho"].round(1).astype(str) + "%",
-                textposition="outside",
-            ))
-            fig.update_layout(height=250, yaxis_range=[0, 108], **CHART_LAYOUT)
-            st.plotly_chart(fig, use_container_width=True)
-
-
-# ══════════════════════════════════════════════════════════════════════
-# TAB 3 — CELL ANALYTICS
-# ══════════════════════════════════════════════════════════════════════
-with tab_cells:
-    if latest_ran.empty:
-        st.info("⏳  No cell data available.")
+    st.subheader("🔍 Diagnosis")
+    cause = infer_cell_cause(cell)
+    if cell["cell_status"] != "UP":
+        st.error(f"**Root cause:** {cause}")
+    elif cell["signal_quality"] == "Poor":
+        st.warning(f"**Assessment:** {cause}")
     else:
-        c1, c2 = st.columns(2)
+        st.info(f"**Assessment:** {cause}")
 
-        with c1:
-            st.markdown("##### SINR: 4G vs 5G per Site")
-            d = latest_ran.groupby(["site_name","tech"])["sinr"].mean().reset_index()
-            fig = px.bar(d, x="site_name", y="sinr", color="tech", barmode="group",
-                         color_discrete_map=TECH_COLORS,
-                         labels={"sinr":"Avg SINR (dB)","site_name":"Site","tech":"Tech"})
-            fig.update_layout(height=270, **CHART_LAYOUT)
-            st.plotly_chart(fig, use_container_width=True)
+    st.subheader("RF Metrics")
+    metrics = pd.DataFrame([{
+        "RSRP (dBm)": cell["rsrp"], "RSRQ (dB)": cell["rsrq"], "SINR (dB)": cell["sinr"],
+        "CQI": cell["cqi"], "HSR (%)": cell["ho_success_rate"], "Downlink (Mbps)": cell["downlink_mbps"],
+    }])
+    st.dataframe(metrics, use_container_width=True, hide_index=True)
 
-        with c2:
-            st.markdown("##### Users: 4G vs 5G per Site")
-            d = latest_ran.groupby(["site_name","tech"])["users"].sum().reset_index()
-            fig = px.bar(d, x="site_name", y="users", color="tech", barmode="group",
-                         color_discrete_map=TECH_COLORS,
-                         labels={"users":"Users","site_name":"Site","tech":"Tech"})
-            fig.update_layout(height=270, **CHART_LAYOUT)
-            st.plotly_chart(fig, use_container_width=True)
-
-        c3, c4 = st.columns(2)
-
-        with c3:
-            st.markdown("##### Downlink Throughput by Cell (top 20)")
-            top_c = latest_ran.nlargest(20, "downlink_mbps")
-            fig = px.bar(top_c, x="cell_id", y="downlink_mbps", color="site_name",
-                         color_discrete_map=SITE_COLORS,
-                         labels={"downlink_mbps":"DL Mbps","cell_id":"Cell","site_name":"Site"})
-            fig.update_layout(height=270, **CHART_LAYOUT)
-            st.plotly_chart(fig, use_container_width=True)
-
-        with c4:
-            st.markdown("##### CQI Distribution (4G vs 5G)")
-            cqi_df = latest_ran.dropna(subset=["cqi"])
-            fig = px.histogram(cqi_df, x="cqi", color="tech", nbins=16, barmode="overlay",
-                               opacity=0.72, color_discrete_map=TECH_COLORS,
-                               labels={"cqi":"CQI","count":"Count","tech":"Tech"})
-            fig.update_layout(height=270, **CHART_LAYOUT)
-            st.plotly_chart(fig, use_container_width=True)
-
-        st.markdown("##### All Cells — Status")
-        cell_tbl = latest_ran[[
-            "site_name","cell_id","tech","cell_status","users",
-            "downlink_mbps","sinr","rsrp","rsrq","cqi","ho_success_rate","signal_quality",
-        ]].copy().round(2)
-        cell_tbl.columns = [
-            "Site","Cell","Tech","Status","Users","DL Mbps",
-            "SINR","RSRP","RSRQ","CQI","HO Success %","Signal Quality",
-        ]
-        st.dataframe(cell_tbl.sort_values(["Site","Cell"]),
-                     use_container_width=True, hide_index=True)
+    if not ran_hour.empty:
+        cell_hist = ran_hour[(ran_hour["site_id"] == cell["site_id"]) & (ran_hour["cell_id"] == cell["cell_id"])]
+        if not cell_hist.empty:
+            st.subheader("Throughput History (last hour)")
+            fig = px.line(cell_hist.sort_values("ingested_at"), x="ingested_at", y="downlink_mbps",
+                          markers=True, template=PLOTLY_TEMPLATE)
+            st.plotly_chart(apply_plotly_style(fig), use_container_width=True)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# TAB 4 — ALERTS
-# ══════════════════════════════════════════════════════════════════════
-with tab_alerts:
-    if alerts_df.empty:
-        st.success("✅  No critical or warning alerts in the selected time window.")
-    else:
-        n_c  = len(alerts_df[alerts_df["alert_severity"] == "CRITICAL"])
-        n_w  = len(alerts_df[alerts_df["alert_severity"] == "WARNING"])
-        n_s  = alerts_df["site_name"].nunique()
+# ===============================
+# PAGE 4 — WEATHER IMPACT
+# ===============================
+def page_weather_impact():
+    render_header()
+    st.markdown('<p class="section-title">🌦️ Environmental Impact on Network</p>', unsafe_allow_html=True)
 
-        ka1, ka2, ka3 = st.columns(3)
-        ka1.metric("Critical", n_c, delta_color="inverse")
-        ka2.metric("Warning",  n_w)
-        ka3.metric("Affected Sites", n_s)
-        st.markdown("")
+    power_alerts = [a for a in alert_feed if a["category"] == "Power"]
+    weather_alerts = [a for a in alert_feed if a["category"] == "Weather"]
 
-        la, ra = st.columns([3, 2])
+    if power_alerts:
+        st.markdown("**🔋 Power Alerts (incl. damaged battery)**")
+        render_alert_feed(power_alerts, max_items=5)
 
-        with la:
-            st.markdown("##### Alert Timeline")
-            alerts_df["ingested_at"] = pd.to_datetime(alerts_df["ingested_at"])
-            fig = px.scatter(
-                alerts_df,
-                x="ingested_at", y="site_name",
-                color="alert_severity",
-                symbol="alert_severity",
-                hover_data=["tech","sinr","rsrp","users"],
-                color_discrete_map={"CRITICAL":"#ff4444","WARNING":"#ffaa00"},
-                labels={"ingested_at":"Time","site_name":"Site","alert_severity":"Severity"},
-            )
-            fig.update_traces(marker_size=9)
-            fig.update_layout(height=300, **CHART_LAYOUT)
-            st.plotly_chart(fig, use_container_width=True)
+    if weather_alerts:
+        st.markdown("**🌧️ Weather-Related Alerts**")
+        render_alert_feed(weather_alerts, max_items=5)
 
-        with ra:
-            st.markdown("##### Alerts by Site")
-            by_site = (alerts_df.groupby(["site_name","alert_severity"])
-                       .size().reset_index(name="count"))
-            fig = px.bar(by_site, x="site_name", y="count", color="alert_severity",
-                         color_discrete_map={"CRITICAL":"#ff4444","WARNING":"#ffaa00"},
-                         labels={"site_name":"Site","count":"Count","alert_severity":"Severity"})
-            fig.update_layout(height=300, **CHART_LAYOUT)
-            st.plotly_chart(fig, use_container_width=True)
+    if weather_latest.empty:
+        st.warning("No weather data — start `weather-producer` and `spark-weather`.")
+        return
 
-        st.markdown("##### Recent Alerts")
-        a_tbl = alerts_df[[
-            "ingested_at","site_name","vendor","tech",
-            "alert_severity","cell_id","sinr","rsrp","users",
-        ]].copy().round(2)
-        a_tbl.columns = ["Time","Site","Vendor","Tech","Severity","Cell","SINR","RSRP","Users"]
+    if ran_weather.empty or ran_weather["weather_temperature_c"].isna().all():
+        st.warning("Weather data exists but cannot be matched to RAN sites (check `ran_site_id`).")
+        return
 
-        def _sev(v):
-            if v == "CRITICAL":
-                return "background:rgba(255,68,68,.15);color:#ff4444;font-weight:700"
-            if v == "WARNING":
-                return "background:rgba(255,170,0,.12);color:#ffaa00"
-            return ""
+    matched = ran_weather.dropna(subset=["weather_temperature_c"])
+    heavy_rain = matched[matched["rain_intensity"].isin(["Moderate", "Heavy"])]
+    poor_in_rain = heavy_rain[heavy_rain["signal_quality"] == "Poor"]
 
-        st.dataframe(a_tbl.style.map(_sev, subset=["Severity"]),
-                     use_container_width=True, hide_index=True)
+    w1, w2, w3, w4 = st.columns(4)
+    w1.metric("🌡️ Avg Temp", f"{matched['weather_temperature_c'].mean():.1f} °C")
+    w2.metric("🌧️ Heavy Rain Cells", len(heavy_rain))
+    w3.metric("📶 Poor Signal (Rain)", len(poor_in_rain))
+    w4.metric("🔋 Low Battery Sites",
+              int(site_insights["battery_charge"].lt(30).sum()) if not site_insights.empty else 0)
 
+    if not poor_in_rain.empty:
+        st.error(
+            f"⚠️ **Rain impact detected:** {len(poor_in_rain)} cell(s) show poor signal during moderate/heavy rainfall. "
+            "Possible rain fade on microwave backhaul or increased atmospheric attenuation."
+        )
 
-# ══════════════════════════════════════════════════════════════════════
-# TAB 5 — WEATHER IMPACT
-# ══════════════════════════════════════════════════════════════════════
-with tab_wx:
-    if latest_wx.empty:
-        st.info("⏳  No weather data yet.")
-    else:
-        wc1, wc2 = st.columns([3, 2])
+    failed_batteries = ran_latest[ran_latest["battery_status"].astype(str).str.upper().isin(["DOWN", "FAILED"])]
+    if not failed_batteries.empty:
+        for site in failed_batteries["site_name"].unique():
+            st.error(f"🔋 **Damaged battery alert** — {site}: battery FAILED/DOWN. Generator may be required.")
 
-        with wc1:
-            st.markdown("##### Current Conditions by Site")
-            fig = make_subplots(rows=1, cols=2,
-                                subplot_titles=("Temperature (°C)", "Humidity (%)"))
-            pal = px.colors.qualitative.Set2
-            for i, (_, row) in enumerate(latest_wx.iterrows()):
-                name = row["ran_site_name"]
-                c = pal[i % len(pal)]
-                fig.add_trace(go.Bar(x=[name], y=[row["weather_temperature_c"]],
-                                     name=name, marker_color=c,
-                                     showlegend=(i == 0)), row=1, col=1)
-                fig.add_trace(go.Bar(x=[name], y=[row["weather_humidity_pct"]],
-                                     name=name, marker_color=c,
-                                     showlegend=False), row=1, col=2)
-            fig.update_layout(height=290, barmode="group",
-                               paper_bgcolor="rgba(0,0,0,0)",
-                               plot_bgcolor="rgba(13,30,53,0.6)",
-                               font=dict(color="#c0cfe0", size=11),
-                               margin=dict(l=10,r=10,t=30,b=10),
-                               legend=dict(bgcolor="rgba(0,0,0,0)",font=dict(size=10)))
-            st.plotly_chart(fig, use_container_width=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        fig = px.scatter(matched, x="weather_temperature_c", y="sinr", color="site_name",
+                         symbol="rain_intensity", trendline="ols", template=PLOTLY_TEMPLATE,
+                         title="SINR vs Temperature", labels={"weather_temperature_c": "°C", "sinr": "SINR (dB)"})
+        st.plotly_chart(apply_plotly_style(fig), use_container_width=True)
+    with c2:
+        fig = px.scatter(matched, x="weather_wind_speed_kmh", y="rsrp", color="site_name",
+                         trendline="ols", template=PLOTLY_TEMPLATE,
+                         title="RSRP vs Wind", labels={"weather_wind_speed_kmh": "km/h", "rsrp": "RSRP (dBm)"})
+        st.plotly_chart(apply_plotly_style(fig), use_container_width=True)
 
-        with wc2:
-            st.markdown("##### Rain Intensity")
-            ri = latest_wx["rain_intensity"].value_counts()
-            fig = go.Figure(go.Pie(
-                labels=ri.index, values=ri.values, hole=0.48,
-                marker_colors=["#4a9eff","#00e096","#ffaa00","#ff4444"],
-            ))
-            fig.update_layout(height=130, margin=dict(l=0,r=0,t=10,b=0),
-                               paper_bgcolor="rgba(0,0,0,0)",
-                               font=dict(color="#c0cfe0"))
-            st.plotly_chart(fig, use_container_width=True)
+    c3, c4 = st.columns(2)
+    with c3:
+        fig = px.scatter(matched, x="weather_humidity_pct", y="cqi", color="signal_quality",
+                         color_discrete_map={"Excellent": "#22c55e", "Good": "#3b82f6", "Poor": "#ef4444"},
+                         trendline="ols", template=PLOTLY_TEMPLATE, title="CQI vs Humidity")
+        st.plotly_chart(apply_plotly_style(fig), use_container_width=True)
+    with c4:
+        fig = px.box(matched, x="rain_intensity", y="downlink_mbps", color="rain_intensity", points="all",
+                     category_orders={"rain_intensity": ["None", "Light", "Moderate", "Heavy"]},
+                     template=PLOTLY_TEMPLATE, title="Downlink vs Rain Intensity")
+        fig.update_layout(showlegend=False)
+        st.plotly_chart(apply_plotly_style(fig), use_container_width=True)
 
-            st.markdown("##### Wind Speed (km/h)")
-            fig = go.Figure(go.Bar(
-                x=latest_wx["ran_site_name"],
-                y=latest_wx["weather_wind_speed_kmh"],
-                marker_color="#4a9eff",
-            ))
-            fig.update_layout(height=145, **CHART_LAYOUT,
-                               margin=dict(l=10,r=10,t=10,b=10))
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Correlation
-        if not latest_ran.empty:
-            st.markdown("##### Weather → Signal Correlation")
-            ran_agg = (latest_ran.groupby("site_id")
-                       .agg(avg_sinr=("sinr","mean"), avg_rsrp=("rsrp","mean"))
-                       .reset_index())
-            merged = ran_agg.merge(
-                latest_wx[[
-                    "ran_site_id","ran_site_name",
-                    "weather_temperature_c","weather_humidity_pct","weather_wind_speed_kmh",
-                ]],
-                left_on="site_id", right_on="ran_site_id", how="inner",
-            )
-            if not merged.empty:
-                sc1, sc2, sc3 = st.columns(3)
-                sct = dict(size=[20]*len(merged), color="ran_site_name",
-                           color_discrete_sequence=list(SITE_COLORS.values()))
-                with sc1:
-                    fig = px.scatter(merged, x="weather_temperature_c", y="avg_sinr",
-                                     title="SINR vs Temperature",
-                                     labels={"weather_temperature_c":"Temp (°C)",
-                                             "avg_sinr":"SINR (dB)","ran_site_name":"Site"},
-                                     **sct)
-                    fig.update_layout(height=250, **CHART_LAYOUT,
-                                       margin=dict(l=10,r=10,t=35,b=10))
-                    st.plotly_chart(fig, use_container_width=True)
-                with sc2:
-                    fig = px.scatter(merged, x="weather_wind_speed_kmh", y="avg_rsrp",
-                                     title="RSRP vs Wind Speed",
-                                     labels={"weather_wind_speed_kmh":"Wind (km/h)",
-                                             "avg_rsrp":"RSRP (dBm)","ran_site_name":"Site"},
-                                     **sct)
-                    fig.update_layout(height=250, **CHART_LAYOUT,
-                                       margin=dict(l=10,r=10,t=35,b=10))
-                    st.plotly_chart(fig, use_container_width=True)
-                with sc3:
-                    fig = px.scatter(merged, x="weather_humidity_pct", y="avg_sinr",
-                                     title="SINR vs Humidity",
-                                     labels={"weather_humidity_pct":"Humidity (%)",
-                                             "avg_sinr":"SINR (dB)","ran_site_name":"Site"},
-                                     **sct)
-                    fig.update_layout(height=250, **CHART_LAYOUT,
-                                       margin=dict(l=10,r=10,t=35,b=10))
-                    st.plotly_chart(fig, use_container_width=True)
-
-        st.markdown("##### Weather Table")
-        w_tbl = latest_wx[[
-            "ran_site_name","ran_region","weather_temperature_c","weather_humidity_pct",
-            "weather_rainfall_mm","weather_wind_speed_kmh","weather_condition",
-            "is_raining","rain_intensity",
-        ]].copy()
-        w_tbl.columns = ["Site","Region","Temp °C","Humidity %","Rainfall mm",
-                          "Wind km/h","Condition","Raining","Rain Intensity"]
-        st.dataframe(w_tbl, use_container_width=True, hide_index=True)
+    st.subheader("Site-Level: Network × Weather")
+    if not site_insights.empty:
+        display = site_insights.copy()
+        for col in ["avg_sinr", "avg_rsrp", "avg_cqi", "avg_downlink_mbps", "battery_charge"]:
+            if col in display.columns:
+                display[col] = display[col].round(2)
+        st.dataframe(display, use_container_width=True, hide_index=True)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# TAB 6 — INFRASTRUCTURE
-# ══════════════════════════════════════════════════════════════════════
-with tab_infra:
-    if latest_ran.empty:
-        st.info("⏳  No infrastructure data yet.")
-    else:
-        infra = (latest_ran.groupby(["site_name","vendor"])
-                 .agg(avg_battery=("battery_charge","mean"),
-                      avg_ru_temp =("avg_ru_temp",   "mean"))
-                 .reset_index().round(1))
-
-        st.markdown("##### Battery Charge Gauges")
-        g_cols = st.columns(min(4, len(infra)))
-
-        for i, (_, row) in enumerate(infra.iterrows()):
-            val = row["avg_battery"]
-            gc  = "#00e096" if val >= 70 else "#ffaa00" if val >= 40 else "#ff4444"
-            fig_g = go.Figure(go.Indicator(
-                mode="gauge+number",
-                value=val,
-                number={"suffix":"%","font":{"size":22,"color":"#c0cfe0"}},
-                title={"text":
-                    f"<b>{row['site_name']}</b><br>"
-                    f"<span style='font-size:0.75em;color:#7a9bbf'>{row['vendor']}</span>",
-                    "font":{"size":12,"color":"#c0cfe0"}},
-                gauge={
-                    "axis":      {"range":[0,100],"tickcolor":"#1e3a5f"},
-                    "bar":       {"color": gc},
-                    "bgcolor":   "rgba(0,0,0,0)",
-                    "borderwidth": 0,
-                    "steps": [
-                        {"range":[0,30],  "color":"rgba(255,68,68,0.18)"},
-                        {"range":[30,60], "color":"rgba(255,170,0,0.12)"},
-                        {"range":[60,100],"color":"rgba(0,224,150,0.10)"},
-                    ],
-                    "threshold": {"line":{"color":"#ff4444","width":2},
-                                  "thickness":0.75,"value":20},
-                },
-            ))
-            fig_g.update_layout(
-                height=200, paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#c0cfe0"), margin=dict(l=10,r=10,t=40,b=10),
-            )
-            if i < len(g_cols):
-                g_cols[i].plotly_chart(fig_g, use_container_width=True)
-
-        ic1, ic2 = st.columns(2)
-
-        with ic1:
-            st.markdown("##### RU Temperature by Site")
-            bar_c = ["#ff4444" if t >= 60 else "#ffaa00" if t >= 45 else "#4a9eff"
-                     for t in infra["avg_ru_temp"]]
-            fig = go.Figure(go.Bar(
-                x=infra["site_name"], y=infra["avg_ru_temp"],
-                marker_color=bar_c,
-                text=infra["avg_ru_temp"].astype(str) + "°C",
-                textposition="outside",
-            ))
-            fig.add_hline(y=60, line_dash="dash", line_color="#ff4444",
-                          annotation_text="Critical 60°C", annotation_font_size=10)
-            fig.add_hline(y=45, line_dash="dash", line_color="#ffaa00",
-                          annotation_text="Warning 45°C", annotation_font_size=10)
-            fig.update_layout(height=260, yaxis_range=[0,80],
-                               yaxis_title="Temperature (°C)", **CHART_LAYOUT)
-            st.plotly_chart(fig, use_container_width=True)
-
-        with ic2:
-            st.markdown("##### Battery Status Distribution")
-            bat_st = (latest_ran.groupby(["site_name","battery_status"])
-                      .size().reset_index(name="count"))
-            if not bat_st.empty:
-                fig = px.bar(bat_st, x="site_name", y="count", color="battery_status",
-                             labels={"site_name":"Site","count":"Cells",
-                                     "battery_status":"Battery Status"})
-                fig.update_layout(height=260, **CHART_LAYOUT)
-                st.plotly_chart(fig, use_container_width=True)
-
-        st.markdown("##### Infrastructure Summary per Site")
-        i_tbl = (latest_ran.groupby("site_name").agg(
-            cells         =("cell_id","nunique"),
-            total_users   =("users","sum"),
-            avg_battery   =("battery_charge","mean"),
-            avg_ru_temp   =("avg_ru_temp","mean"),
-            critical_cells=("alert_severity", lambda x: (x=="CRITICAL").sum()),
-            vendor        =("vendor","first"),
-        ).reset_index().round(2))
-        i_tbl.columns = ["Site","Cells","Users","Avg Battery %",
-                          "Avg RU Temp °C","Critical Cells","Vendor"]
-        st.dataframe(i_tbl, use_container_width=True, hide_index=True)
-
-
-# ══════════════════════════════════════════════════════════════════════
-# TAB 7 — STREAM HEALTH
-# ══════════════════════════════════════════════════════════════════════
-with tab_stream:
-    st.markdown("##### Pipeline Counters")
-    p1, p2, p3, p4 = st.columns(4)
-
-    if HAS_RAN:
-        tot  = sql("SELECT COUNT(*) AS c FROM processed_ran_metrics")
-        rec5 = sql("SELECT COUNT(*) AS c FROM processed_ran_metrics "
-                   "WHERE ingested_at > NOW() - INTERVAL '5 minutes'")
-        p1.metric("RAN Records (total)", f"{int(tot['c'].iloc[0]):,}"  if not tot.empty  else "–")
-        p2.metric("RAN (last 5 min)",    f"{int(rec5['c'].iloc[0]):,}" if not rec5.empty else "–")
-
-    if HAS_WX:
-        wc = sql("SELECT COUNT(*) AS c FROM weather_metrics")
-        p3.metric("Weather Records", f"{int(wc['c'].iloc[0]):,}" if not wc.empty else "–")
-
-    if HAS_KAFKA:
-        kc_ = sql("SELECT COUNT(*) AS c FROM kafka_events")
-        p4.metric("Kafka Events", f"{int(kc_['c'].iloc[0]):,}" if not kc_.empty else "–")
-
-    if HAS_RAN:
-        st.markdown("##### RAN Ingestion Rate (rows/minute)")
-        ir = sql(f"""
-            SELECT DATE_TRUNC('minute', ingested_at) AS ts, COUNT(*) AS cnt
-            FROM processed_ran_metrics
-            WHERE ingested_at > NOW() - INTERVAL '{MINS} minutes'
-            GROUP BY 1 ORDER BY 1
-        """)
-        if not ir.empty:
-            fig = px.area(ir, x="ts", y="cnt",
-                          labels={"ts":"","cnt":"Rows/min"})
-            fig.update_layout(height=230, **CHART_LAYOUT)
-            st.plotly_chart(fig, use_container_width=True)
-
-    if HAS_KAFKA:
-        st.markdown("##### Kafka Topic Summary")
-        kt = sql("""
-            SELECT topic,
-                   COUNT(*)                                                        AS total_events,
-                   MAX(event_time)                                                 AS last_event,
-                   COUNT(*) FILTER (WHERE event_time > NOW() - INTERVAL '5 minutes') AS last_5m
-            FROM kafka_events
-            GROUP BY topic ORDER BY total_events DESC
-        """)
-        if not kt.empty:
-            st.dataframe(kt, use_container_width=True, hide_index=True)
-
-        st.markdown("##### Latest Raw Events (sample)")
-        raw = sql("""
-            SELECT topic, event_time, message_key,
-                   LEFT(message_value::text, 180) AS payload_preview,
-                   ingested_at
-            FROM kafka_events
-            ORDER BY ingested_at DESC LIMIT 15
-        """)
-        if not raw.empty:
-            st.dataframe(raw, use_container_width=True, hide_index=True)
-    else:
-        st.info("kafka_events table not found — Kafka landing sink may not be active.")
+# ===============================
+# NAVIGATION
+# ===============================
+pg = st.navigation({
+    "Monitoring": [
+        st.Page(page_network_overview, title="Network Overview", icon="📡", default=True),
+        st.Page(page_tower_insights, title="Tower Insights", icon="🗼"),
+        st.Page(page_cell_diagnostics, title="Cell Diagnostics", icon="📶"),
+        st.Page(page_weather_impact, title="Weather Impact", icon="🌦️"),
+    ],
+})
+pg.run()

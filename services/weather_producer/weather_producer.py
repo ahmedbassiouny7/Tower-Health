@@ -147,6 +147,17 @@ def get_weather_locations() -> list[dict[str, str]]:
     return locations or DEFAULT_TOWER_LOCATIONS
 
 
+def resolve_tower_site(location: dict[str, str]) -> dict[str, str]:
+    """Map polled coordinates to the matching RAN site_id when possible."""
+    if location.get("site_id"):
+        return location
+    query = location.get("query", "")
+    for tower in DEFAULT_TOWER_LOCATIONS:
+        if tower["query"] == query:
+            return {**location, "site_id": tower["site_id"], "site_name": tower["site_name"]}
+    return location
+
+
 def build_weather_event(location: dict[str, str], mapped_weather: dict[str, Any]) -> dict[str, Any]:
     """Wrap selected WeatherAPI fields with metadata useful for Kafka consumers."""
     event: dict[str, Any] = {
@@ -244,7 +255,7 @@ def main() -> int:
                 try:
                     raw_weather    = fetch_current_weather(api_key, location["query"])
                     mapped_weather = map_to_tower_weather_fields(raw_weather)
-                    event          = build_weather_event(location, mapped_weather)
+                    event          = build_weather_event(resolve_tower_site(location), mapped_weather)
 
                     if OUTPUT_MODE == "kafka" and producer:
                         emit_kafka(producer, topic, event)

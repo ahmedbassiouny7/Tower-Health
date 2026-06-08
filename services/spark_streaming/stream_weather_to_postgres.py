@@ -10,7 +10,15 @@ POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
 POSTGRES_DB = os.getenv("POSTGRES_DB", "towerhealth")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "towerhealth")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "towerhealth")
-CHECKPOINT_DIR = os.getenv("SPARK_CHECKPOINT_DIR", "/tmp/towerhealth-checkpoints-weather")
+CHECKPOINT_DIR = os.getenv("SPARK_CHECKPOINT_DIR", "/tmp/towerhealth-checkpoints-weather-v2")
+
+WEATHER_TABLE_COLUMNS = [
+    "event_timestamp", "source_system", "location_query", "ran_site_id", "ran_site_name",
+    "ran_region", "weather_temperature_c", "weather_humidity_pct", "weather_rainfall_mm",
+    "weather_wind_speed_kmh", "weather_condition", "weather_observed_at", "weather_fetched_at",
+    "weather_location_name", "weather_region", "weather_country", "weather_latitude",
+    "weather_longitude", "is_raining", "rain_intensity", "ingested_at",
+]
 
 # 2. الـ Schema (بما فيها الـ precip_mm للمطر)
 # عدلي الـ Schema عشان تطابق الـ Fields اللي طالعة من الكود
@@ -37,8 +45,9 @@ weather_schema = StructType([
 ])
 
 def write_weather_batch(batch_df, batch_id):
-    if batch_df.rdd.isEmpty(): return
-    batch_df.write.format("jdbc") \
+    if batch_df.rdd.isEmpty():
+        return
+    batch_df.select(*WEATHER_TABLE_COLUMNS).write.format("jdbc") \
         .option("url", f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}") \
         .option("user", POSTGRES_USER) \
         .option("password", POSTGRES_PASSWORD) \
