@@ -88,6 +88,59 @@ Useful local URLs:
 | Local Streamlit dashboard | `http://localhost:8501` |
 | Kafka Connect REST API | `http://localhost:8083` |
 
+### Streaming Path
+
+The local streaming path is the real-time part of the project:
+
+```mermaid
+flowchart LR
+    ran["RAN Generator<br/>services/ran_generator"]
+    weather["Weather Producer<br/>services/weather_producer"]
+    kafka["Kafka Topics<br/>ran_telemetry + weather_events"]
+    sparkRan["Spark Stream<br/>stream_kafka_to_postgres.py"]
+    sparkWeather["Spark Weather Stream<br/>stream_weather_to_postgres.py"]
+    postgres["Postgres<br/>kafka_events table"]
+    dashboard["Local Streamlit Dashboard<br/>services/streamlit_dashboard"]
+    s3["Optional S3 Sink<br/>raw-data/ topic archive"]
+
+    ran --> kafka
+    weather --> kafka
+    kafka --> sparkRan
+    kafka --> sparkWeather
+    kafka -. optional .-> s3
+    sparkRan --> postgres
+    sparkWeather --> postgres
+    postgres --> dashboard
+```
+
+Step by step:
+
+| Step | Component | What happens |
+|---|---|---|
+| 1 | `ran-generator` | Generates synthetic tower snapshots and publishes them to Kafka topic `ran_telemetry` |
+| 2 | `weather-producer` | Fetches weather for tower regions and publishes events to Kafka topic `weather_events` |
+| 3 | Kafka cluster | Stores the streaming messages across three brokers with replication factor 3 |
+| 4 | `spark-stream` | Reads Kafka topics and writes raw event records into Postgres table `kafka_events` |
+| 5 | `spark-weather` | Reads weather events separately using its own checkpoint path |
+| 6 | Postgres | Keeps the latest consumed events for local validation and dashboard queries |
+| 7 | Local Streamlit dashboard | Reads Postgres and shows message counts and latest events |
+
+The two main Kafka topics are:
+
+```text
+ran_telemetry
+weather_events
+```
+
+The Spark streaming jobs use checkpoint volumes:
+
+```text
+spark_ran_checkpoints
+spark_weather_checkpoints
+```
+
+These checkpoints help Spark remember what Kafka offsets were already processed, so restarting the containers does not intentionally reprocess the same stream from the beginning.
+
 ### Kafka Fault Tolerance
 
 The local Kafka stack runs three KRaft brokers:
